@@ -958,7 +958,7 @@ def compute_roi_scores(db, cfg):
     with _db_lock:
         rows = db.execute(
             "SELECT url, status_code, title, tech, server, tls_state, "
-            "missing_headers, endpoint_count FROM urls"
+            "missing_headers, endpoint_count, promoted_to_target FROM urls"
         ).fetchall()
 
     results = []
@@ -1049,6 +1049,7 @@ def compute_roi_scores(db, cfg):
             "title": row["title"] or "",
             "tech": tech,
             "server": row["server"] or "",
+            "promoted_to_target": bool(row["promoted_to_target"]),
         })
 
     with _db_lock:
@@ -1218,6 +1219,7 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/urls":            self.handle_urls,
             "/api/screenshots":     self.handle_screenshots_list,
             "/api/roi":             self.handle_roi,
+            "/api/promoted":        self.handle_promoted,
         }
 
         handler = routes.get(path)
@@ -1246,6 +1248,10 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.handle_stop_tool()
         elif path == "/api/roi/recalculate":
             self.handle_roi_recalculate()
+        elif path == "/api/promote":
+            self.handle_promote()
+        elif path == "/api/demote":
+            self.handle_demote()
         elif path.startswith("/api/"):
             self.send_json({"error": "not found"}, 404)
         else:
@@ -1476,6 +1482,60 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "roi": results,
             "count": len(results),
         })
+
+    def handle_promote(self):
+        """POST /api/promote — promote a URL to a URL-target for deep testing."""
+        body = self.read_body_json()
+        if not body:
+            return
+        url = body.get("url", "").strip()
+        if not url:
+            self.send_json({"error": "url required"}, 400)
+            return
+        with _db_lock:
+            row = self.db.execute(
+                "SELECT url, roi_score, promoted_to_target FROM urls WHERE url=?",
+                (url,)
+            ).fetchone()
+            if not row:
+                self.send_json({"error": "url not found in database"}, 404)
+                return
+            self.db.execute(
+                "UPDATE urls SET promoted_to_target=1 WHERE url=?", (url,)
+            )
+            self.db.commit()
+        self.send_json({
+            "ok": True,
+            "url": url,
+            "promoted_to_target": True,
+            "roi_score": row["roi_score"],
+        })
+
+    def handle_demote(self):
+        """POST /api/demote — undo promotion of a URL-target."""
+        body = self.read_body_json()
+        if not body:
+            return
+        url = body.get("url", "").strip()
+        if not url:
+            self.send_json({"error": "url required"}, 400)
+            return
+        with _db_lock:
+            self.db.execute(
+                "UPDATE urls SET promoted_to_target=0 WHERE url=?", (url,)
+            )
+            self.db.commit()
+        self.send_json({"ok": True, "url": url, "promoted_to_target": False})
+
+    def handle_promoted(self):
+        """GET /api/promoted — return all promoted URL-targets."""
+        with _db_lock:
+            rows = self.db.execute(
+                "SELECT url, status_code, title, tech, server, roi_score, "
+                "promoted_to_target, created_at "
+                "FROM urls WHERE promoted_to_target=1 ORDER BY roi_score DESC"
+            ).fetchall()
+        self.send_json({"promoted": [dict(r) for r in rows], "count": len(rows)})
 
     def handle_screenshots_list(self):
         """GET /api/screenshots — list available screenshots."""

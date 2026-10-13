@@ -75,6 +75,7 @@ async function init() {
     ]);
     bindEvents();
     updateTargetTypeUI();
+    loadPromoted();
     connectSSE();
 }
 
@@ -303,17 +304,23 @@ function updateProfileDisplay() {
 
 function updateTargetTypeUI() {
     state.targetType = dom.targetType.value;
+    const promotedSelect = $("#promoted-select");
 
     if (state.targetType === "wildcard") {
         dom.roiSection.classList.remove("hidden");
         dom.findingsSection.classList.add("hidden");
         dom.target.placeholder = "example.com";
         dom.pipelineSelect.classList.remove("hidden");
+        if (promotedSelect) promotedSelect.classList.add("hidden");
     } else {
         dom.roiSection.classList.add("hidden");
         dom.findingsSection.classList.remove("hidden");
         dom.target.placeholder = "https://app.example.com";
         dom.pipelineSelect.classList.add("hidden");
+        if (promotedSelect) {
+            promotedSelect.classList.remove("hidden");
+            loadPromoted();
+        }
     }
 
     renderToolButtons();
@@ -432,6 +439,26 @@ function bindEvents() {
     const btnROI = $("#btn-recalculate-roi");
     if (btnROI) {
         btnROI.addEventListener("click", recalculateROI);
+    }
+
+    // Promote buttons in ROI table (event delegation)
+    const roiTable = $("#roi-table");
+    if (roiTable) {
+        roiTable.addEventListener("click", (e) => {
+            const btn = e.target.closest(".btn-promote");
+            if (!btn) return;
+            const url = btn.dataset.url;
+            if (url) promoteUrl(url);
+        });
+    }
+
+    // Promoted target selector — fill target input on selection
+    const promotedSelect = $("#promoted-select");
+    if (promotedSelect) {
+        promotedSelect.addEventListener("change", () => {
+            const val = promotedSelect.value;
+            if (val) dom.target.value = val;
+        });
     }
 
     // Tool buttons — individual run
@@ -643,7 +670,7 @@ function renderROI(results) {
 
     // Ranked table
     let html = '<table class="data-table"><thead><tr>';
-    html += '<th>ROI</th><th>URL</th><th>Status</th><th>Title</th><th>Breakdown</th>';
+    html += '<th>ROI</th><th>URL</th><th>Status</th><th>Title</th><th>Breakdown</th><th>Action</th>';
     html += '</tr></thead><tbody>';
 
     for (const r of results) {
@@ -660,10 +687,50 @@ function renderROI(results) {
         html += `<td>${r.status_code || "—"}</td>`;
         html += `<td>${esc(r.title || "—")}</td>`;
         html += `<td class="roi-breakdown">${esc(breakdownStr)}</td>`;
+        if (r.promoted_to_target) {
+            html += `<td><span class="promoted-badge">Promoted</span></td>`;
+        } else {
+            html += `<td><button class="btn-promote" data-url="${esc(r.url)}">Promote</button></td>`;
+        }
         html += `</tr>`;
     }
     html += '</tbody></table>';
     table.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// Promote to URL target
+// ---------------------------------------------------------------------------
+
+async function promoteUrl(url) {
+    try {
+        const data = await apiPost("/api/promote", {url});
+        if (data.ok) {
+            appendOutput(`[*] Promoted ${url} to URL target`, "output-info");
+            loadROI();
+            loadPromoted();
+        } else {
+            appendOutput(`[!] Promote failed: ${data.error}`, "output-error");
+        }
+    } catch (err) {
+        appendOutput(`[!] Promote failed: ${err.message}`, "output-error");
+    }
+}
+
+async function loadPromoted() {
+    const sel = $("#promoted-select");
+    if (!sel) return;
+    try {
+        const data = await api("/api/promoted");
+        const promoted = data.promoted || [];
+        sel.innerHTML = '<option value="">— select promoted target —</option>';
+        for (const p of promoted) {
+            const opt = document.createElement("option");
+            opt.value = p.url;
+            opt.textContent = `[${p.roi_score}] ${p.url}`;
+            sel.appendChild(opt);
+        }
+    } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------

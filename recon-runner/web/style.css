@@ -325,4 +325,38 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
     display: block;
 }
 
+/* Promote button & badge */
+.btn-promote {
+    padding: 2px 10px;
+    border: 1px solid var(--green);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--green);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    transition: background 0.15s;
+}
+.btn-promote:hover { background: rgba(63,185,80,0.15); }
+.promoted-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 3px;
+    background: rgba(63,185,80,0.2);
+    color: var(--green);
+    font-size: 0.7rem;
+    font-weight: bold;
+    border: 1px solid var(--green);
+}
+#promoted-select {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    max-width: 350px;
+}
+
 .hidden { display: none !important; }

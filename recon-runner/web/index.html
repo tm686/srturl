@@ -25,6 +25,7 @@
                 </select>
                 <input type="text" id="target" placeholder="example.com or https://app.example.com">
                 <button id="btn-start">Run Workflow</button>
+                <button id="btn-stop" class="hidden">Stop</button>
             </div>
             <div id="throttle-control">
                 <label>Throttle:</label>
@@ -47,6 +48,7 @@
             <div id="output-header">
                 <span id="active-tool">Idle</span>
                 <span id="active-rate"></span>
+                <span id="parsed-count"></span>
                 <button id="btn-clear-output">Clear</button>
             </div>
             <pre id="output-pane"></pre>

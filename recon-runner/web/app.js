@@ -12,6 +12,9 @@ const state = {
     activeProfile: "stealth",
     profileValues: {},
     targetType: "wildcard",
+    running: false,
+    activeTool: null,
+    parsedCount: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,6 +30,7 @@ const dom = {
     targetType:     $("#target-type"),
     target:         $("#target"),
     btnStart:       $("#btn-start"),
+    btnStop:        $("#btn-stop"),
     profileSelect:  $("#profile-select"),
     toolButtons:    $("#tool-buttons"),
     outputPane:     $("#output-pane"),
@@ -35,6 +39,7 @@ const dom = {
     btnClear:       $("#btn-clear-output"),
     roiSection:     $("#roi-section"),
     findingsSection:$("#findings-section"),
+    parsedCount:    $("#parsed-count"),
 };
 
 // ---------------------------------------------------------------------------
@@ -66,6 +71,77 @@ async function init() {
     ]);
     bindEvents();
     updateTargetTypeUI();
+    connectSSE();
+}
+
+// ---------------------------------------------------------------------------
+// SSE connection
+// ---------------------------------------------------------------------------
+
+let evtSource = null;
+
+function connectSSE() {
+    if (evtSource) evtSource.close();
+    evtSource = new EventSource("/api/events");
+
+    evtSource.addEventListener("tool_start", (e) => {
+        const d = JSON.parse(e.data);
+        state.running = true;
+        state.activeTool = d.tool;
+        state.parsedCount = 0;
+        updateRunningUI();
+        appendOutput(`\n[*] ${d.tool} started`, "output-info");
+        appendOutput(`    cmd: ${d.cmd}`, "output-stderr");
+        appendOutput(`    profile: ${d.profile} (rate:${d.values.rate} threads:${d.values.threads} delay:${d.values.delay}ms)`, "output-stderr");
+    });
+
+    evtSource.addEventListener("stdout", (e) => {
+        const d = JSON.parse(e.data);
+        if (d.type === "json") {
+            state.parsedCount++;
+            updateParsedCount();
+            // Show summary or compact JSON
+            if (d.summary) {
+                appendOutput(`  ${d.summary}`, "output-json");
+            } else {
+                // Compact JSON line
+                appendOutput(`  ${d.line}`, "output-json");
+            }
+        } else {
+            appendOutput(d.line, "output-text");
+        }
+    });
+
+    evtSource.addEventListener("stderr", (e) => {
+        const d = JSON.parse(e.data);
+        appendOutput(d.line, "output-stderr");
+    });
+
+    evtSource.addEventListener("tool_done", (e) => {
+        const d = JSON.parse(e.data);
+        state.running = false;
+        state.activeTool = null;
+        updateRunningUI();
+        const status = d.exit_code === 0 ? "completed" : `exited (${d.exit_code})`;
+        appendOutput(`\n[*] ${d.tool} ${status} — ${d.parsed} results parsed`, "output-info");
+    });
+
+    evtSource.addEventListener("error", (e) => {
+        if (evtSource.readyState === EventSource.CLOSED) {
+            // Reconnect after a delay
+            setTimeout(connectSSE, 3000);
+            return;
+        }
+        try {
+            const d = JSON.parse(e.data);
+            appendOutput(`[!] ${d.tool}: ${d.message}`, "output-error");
+            state.running = false;
+            state.activeTool = null;
+            updateRunningUI();
+        } catch {
+            // SSE connection error, not a data event
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +182,6 @@ function renderToolButtons() {
     // Group by phase
     const phases = {};
     for (const [name, info] of Object.entries(state.tools)) {
-        // Filter by target type
         if (!info.target_types.includes(targetType)) continue;
         const phase = info.phase || "other";
         if (!phases[phase]) phases[phase] = [];
@@ -192,7 +267,6 @@ function updateProfileDisplay() {
 function updateTargetTypeUI() {
     state.targetType = dom.targetType.value;
 
-    // Show/hide sections by type
     if (state.targetType === "wildcard") {
         dom.roiSection.classList.remove("hidden");
         dom.findingsSection.classList.add("hidden");
@@ -207,20 +281,94 @@ function updateTargetTypeUI() {
 }
 
 // ---------------------------------------------------------------------------
+// Running state UI
+// ---------------------------------------------------------------------------
+
+function updateRunningUI() {
+    if (state.running) {
+        dom.activeTool.textContent = state.activeTool || "Running...";
+        dom.btnStart.disabled = true;
+        dom.btnStart.textContent = "Running...";
+        dom.btnStop.classList.remove("hidden");
+    } else {
+        dom.activeTool.textContent = "Idle";
+        dom.btnStart.disabled = false;
+        dom.btnStart.textContent = "Run Workflow";
+        dom.btnStop.classList.add("hidden");
+        if (dom.parsedCount) dom.parsedCount.textContent = "";
+    }
+}
+
+function updateParsedCount() {
+    if (dom.parsedCount) {
+        dom.parsedCount.textContent = `${state.parsedCount} parsed`;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Output pane
 // ---------------------------------------------------------------------------
+
+const MAX_OUTPUT_LINES = 5000;
 
 function appendOutput(text, cls) {
     const line = document.createElement("span");
     if (cls) line.className = cls;
     line.textContent = text + "\n";
     dom.outputPane.appendChild(line);
+
+    // Trim old lines
+    while (dom.outputPane.childElementCount > MAX_OUTPUT_LINES) {
+        dom.outputPane.removeChild(dom.outputPane.firstChild);
+    }
+
     dom.outputPane.scrollTop = dom.outputPane.scrollHeight;
 }
 
 function clearOutput() {
     dom.outputPane.innerHTML = "";
     dom.activeTool.textContent = "Idle";
+    state.parsedCount = 0;
+    updateParsedCount();
+}
+
+// ---------------------------------------------------------------------------
+// Run / Stop
+// ---------------------------------------------------------------------------
+
+async function runTool(toolName) {
+    const target = dom.target.value.trim();
+    if (!target) {
+        appendOutput("[!] Enter a target first", "output-warn");
+        return;
+    }
+    if (state.running) {
+        appendOutput("[!] A tool is already running", "output-warn");
+        return;
+    }
+
+    try {
+        const data = await apiPost("/api/run", {
+            tool: toolName,
+            target: target,
+            target_type: state.targetType,
+            context: {target, host: target, url: target},
+        });
+        if (data.error) {
+            appendOutput(`[!] ${data.error}`, "output-error");
+        }
+    } catch (err) {
+        appendOutput(`[!] Failed to start ${toolName}: ${err.message}`, "output-error");
+    }
+}
+
+async function stopTool() {
+    try {
+        await apiPost("/api/stop", {});
+        appendOutput("[*] Stop signal sent", "output-warn");
+    } catch {
+        appendOutput("[!] Failed to send stop signal", "output-error");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,25 +382,37 @@ function bindEvents() {
     });
     dom.btnClear.addEventListener("click", clearOutput);
 
-    // Tool buttons — individual run (step 2+)
+    if (dom.btnStop) {
+        dom.btnStop.addEventListener("click", stopTool);
+    }
+
+    // Tool buttons — individual run
     dom.toolButtons.addEventListener("click", (e) => {
         const btn = e.target.closest("button");
-        if (!btn || btn.classList.contains("missing")) return;
+        if (!btn || !btn.dataset.tool) return;
+        if (btn.classList.contains("missing")) {
+            appendOutput(`[!] ${btn.dataset.tool}: binary not found`, "output-error");
+            return;
+        }
         if (btn.classList.contains("disabled")) {
             appendOutput(`[!] ${btn.dataset.tool} is disabled`, "output-warn");
             return;
         }
-        appendOutput(`[*] ${btn.dataset.tool} — runner not yet implemented`, "output-info");
+        runTool(btn.dataset.tool);
     });
 
-    // Run workflow (step 2+)
+    // Run workflow button — for now runs first available tool (full workflow in step 4)
     dom.btnStart.addEventListener("click", () => {
         const target = dom.target.value.trim();
         if (!target) {
             appendOutput("[!] Enter a target first", "output-warn");
             return;
         }
-        appendOutput(`[*] Workflow run not yet implemented (target: ${target}, type: ${state.targetType})`, "output-info");
+        if (state.running) {
+            appendOutput("[!] A tool is already running", "output-warn");
+            return;
+        }
+        appendOutput(`[*] Full workflow not yet implemented — use individual tool buttons`, "output-info");
     });
 }
 

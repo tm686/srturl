@@ -20,19 +20,48 @@ gh_release_bin() {
     local url
     url=$(curl -sL "https://api.github.com/repos/$repo/releases/latest" \
         | grep -oP "\"browser_download_url\":\s*\"[^\"]*${pattern}[^\"]*\"" \
-        | head -1 | grep -oP 'https://[^"]+')
+        | head -1 | grep -oP 'https://[^"]+') || true
     if [ -z "$url" ]; then
         echo "[!] Could not find release for $binary ($pattern)"
         return 1
     fi
     local tmp="$(mktemp)"
     curl -sL "$url" -o "$tmp"
+
+    # Extract archive into a temp dir, then find the actual binary
+    local extract_dir="$(mktemp -d)"
     case "$url" in
-        *.zip)   unzip -qo "$tmp" -d "$OUTDIR/bin/" && rm "$tmp" ;;
-        *.tar.gz|*.tgz) tar xzf "$tmp" -C "$OUTDIR/bin/" && rm "$tmp" ;;
-        *)       mv "$tmp" "$OUTDIR/bin/$binary" ;;
+        *.zip)
+            unzip -qo "$tmp" -d "$extract_dir" && rm "$tmp"
+            ;;
+        *.tar.gz|*.tgz)
+            tar xzf "$tmp" -C "$extract_dir" && rm "$tmp"
+            ;;
+        *)
+            mv "$tmp" "$OUTDIR/bin/$binary"
+            chmod +x "$OUTDIR/bin/$binary" 2>/dev/null || true
+            rm -rf "$extract_dir"
+            return 0
+            ;;
     esac
+
+    # PD tools extract into nested dirs (e.g., subfinder_0.6.0_linux_amd64/subfinder)
+    # Find the actual binary by name and move it
+    local found
+    found=$(find "$extract_dir" -type f -name "$binary" | head -1)
+    if [ -n "$found" ]; then
+        mv "$found" "$OUTDIR/bin/$binary"
+    else
+        # Fallback: look for any executable in extracted files
+        found=$(find "$extract_dir" -type f -executable | head -1)
+        if [ -n "$found" ]; then
+            mv "$found" "$OUTDIR/bin/$binary"
+        else
+            echo "[!] No binary found after extracting $binary"
+        fi
+    fi
     chmod +x "$OUTDIR/bin/$binary" 2>/dev/null || true
+    rm -rf "$extract_dir"
 }
 
 # --- ProjectDiscovery tools ---
@@ -58,6 +87,13 @@ else
     echo "[!] Go not installed — skipping gau/waybackurls build"
 fi
 
+# --- Create httpx-toolkit alias ---
+# tools.json uses binary_aliases: ["httpx-toolkit", "httpx"]
+if [ -f "$OUTDIR/bin/httpx" ] && [ ! -f "$OUTDIR/bin/httpx-toolkit" ]; then
+    cp "$OUTDIR/bin/httpx" "$OUTDIR/bin/httpx-toolkit"
+    echo "[*] Created httpx-toolkit alias"
+fi
+
 # --- Nuclei templates ---
 echo "[*] Downloading nuclei-templates..."
 curl -sL "https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/main.zip" \
@@ -72,6 +108,9 @@ curl -sL "$SECLISTS_RAW/Discovery/Web-Content/raft-medium-directories.txt" \
     -o "$OUTDIR/wordlists/raft-medium-directories.txt"
 curl -sL "$SECLISTS_RAW/Discovery/Web-Content/common.txt" \
     -o "$OUTDIR/wordlists/common.txt"
+# DNS wordlist for R2 brute-force pipeline
+curl -sL "$SECLISTS_RAW/Discovery/DNS/subdomains-top1million-5000.txt" \
+    -o "$OUTDIR/wordlists/dns-subdomains.txt"
 # Arjun's default params
 curl -sL "https://raw.githubusercontent.com/s0md3v/Arjun/master/arjun/db/large.txt" \
     -o "$OUTDIR/wordlists/arjun-params.txt" 2>/dev/null || true
@@ -90,7 +129,18 @@ echo "[*] Downloading sqlmap source..."
 git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git "$OUTDIR/pysrc/sqlmap" 2>/dev/null && \
     rm -rf "$OUTDIR/pysrc/sqlmap/.git" || echo "[!] sqlmap clone failed"
 
+# --- Summary ---
+echo ""
+echo "[*] Bundle contents:"
+echo "    Binaries:"
+for f in "$OUTDIR"/bin/*; do
+    [ -f "$f" ] && echo "      $(basename "$f")"
+done
+echo "    Templates: $(find "$OUTDIR/nuclei-templates" -name "*.yaml" 2>/dev/null | wc -l) yaml files"
+echo "    Wordlists: $(ls "$OUTDIR/wordlists/"*.txt 2>/dev/null | wc -l) files"
+
 # --- Zip it up ---
+echo ""
 echo "[*] Creating $BUNDLE_NAME..."
 cd "$OUTDIR" && zip -qr "$OLDPWD/$BUNDLE_NAME" . && cd "$OLDPWD"
 

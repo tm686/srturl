@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # recon-runner launcher
 # Prepends paths.json bin_dir to PATH, then starts the server.
+# Usage: bash run.sh [--daemon] [--port PORT]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+
+PORT=8777
+DAEMON=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --daemon|-d) DAEMON=true; shift ;;
+        --port|-p)   PORT="$2"; shift 2 ;;
+        *)           echo "Usage: bash run.sh [--daemon] [--port PORT]"; exit 1 ;;
+    esac
+done
 
 PATHS_JSON="config/paths.json"
 
@@ -15,8 +27,18 @@ if [ -f "$PATHS_JSON" ]; then
         echo "[*] Prepended $BIN_DIR to PATH"
     fi
 else
-    echo "[!] $PATHS_JSON not found — run install.sh first"
+    echo "[!] $PATHS_JSON not found — run install.sh first, or the server will"
+    echo "    look for tools on the default PATH."
 fi
 
-echo "[*] Starting recon-runner on 127.0.0.1:8777"
-exec python3 server.py --host 127.0.0.1 --port 8777
+echo "[*] Starting recon-runner on 127.0.0.1:$PORT"
+echo "[*] Open http://127.0.0.1:$PORT in your browser"
+
+if [ "$DAEMON" = true ]; then
+    nohup python3 server.py --host 127.0.0.1 --port "$PORT" > "$SCRIPT_DIR/data/server.log" 2>&1 &
+    echo "[*] Running in background (PID $!)"
+    echo "[*] Logs: $SCRIPT_DIR/data/server.log"
+    echo "[*] Stop: kill $!"
+else
+    exec python3 server.py --host 127.0.0.1 --port "$PORT"
+fi

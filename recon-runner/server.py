@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import shutil
@@ -245,6 +246,40 @@ def init_db(db_path):
     conn.executescript(SCHEMA_SQL)
     conn.commit()
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Scope gating
+# ---------------------------------------------------------------------------
+
+def is_in_scope(url_or_host, cfg):
+    """Check whether a URL or hostname falls within the configured scope.
+
+    Returns True if scope is empty (open scope) or the host matches
+    an allowed_domains entry (supports wildcards like *.example.com).
+    """
+    scope = cfg.scope
+    allowed = scope.get("allowed_domains", [])
+    if not allowed:
+        return True  # no scope constraints — everything is in scope
+
+    # Extract hostname from URL
+    if "://" in url_or_host:
+        host = urlparse(url_or_host).hostname or ""
+    else:
+        host = url_or_host.split("/")[0].split(":")[0]
+    host = host.lower()
+
+    for pattern in allowed:
+        pattern = pattern.lower()
+        if pattern.startswith("*."):
+            # *.example.com matches example.com and any subdomain
+            base = pattern[2:]
+            if host == base or host.endswith("." + base):
+                return True
+        elif fnmatch.fnmatch(host, pattern):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +865,33 @@ def consolidate_unprobed_hosts(db, scan_id=None):
     return tmp.name, len(fqdns)
 
 
+def consolidate_url_target(target_url):
+    """Return a consolidation function that writes a single URL to a temp file."""
+    def _consolidate(db, scan_id=None):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".target-url.txt",
+                                          dir=str(SCRIPT_DIR / "data"),
+                                          delete=False)
+        tmp.write(target_url + "\n")
+        tmp.close()
+        return tmp.name, 1
+    return _consolidate
+
+
+def consolidate_discovered_urls(db, scan_id=None):
+    """Gather all known URLs for the current scan target — used to feed nuclei."""
+    with _db_lock:
+        rows = db.execute("SELECT url FROM urls").fetchall()
+    urls = sorted(set(r["url"] for r in rows if r["url"]))
+    if not urls:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".all-urls.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(urls) + "\n")
+    tmp.close()
+    return tmp.name, len(urls)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline runner — chains tools with consolidation between steps
 # ---------------------------------------------------------------------------
@@ -1176,6 +1238,76 @@ def build_wildcard_steps(scan_id):
     ]
 
 
+# ---------------------------------------------------------------------------
+# URL workflow pipelines — deep testing of a single promoted URL
+# ---------------------------------------------------------------------------
+
+def build_url_recon_steps(target_url):
+    """URL U1: collect historical URLs + crawl endpoints."""
+    consolidate_target = consolidate_url_target(target_url)
+    return [
+        {
+            "tool": "gau",
+            "label": "U1: Historical URL collection (gau)",
+            "required": False,
+        },
+        {
+            "tool": "waybackurls",
+            "label": "U1: Wayback URL collection",
+            "required": False,
+        },
+        {
+            "tool": "katana",
+            "consolidate": consolidate_target,
+            "context_key": "in_file",
+            "label": "U1: Crawl target URL",
+            "required": False,
+        },
+    ]
+
+
+def build_url_params_steps(target_url):
+    """URL U2: parameter discovery + directory fuzzing."""
+    return [
+        {
+            "tool": "arjun",
+            "label": "U2: Parameter discovery",
+            "required": False,
+        },
+        {
+            "tool": "ffuf",
+            "label": "U2: Directory fuzzing",
+            "required": False,
+        },
+    ]
+
+
+def build_url_attack_steps(target_url):
+    """URL U3: attack phase — dalfox + nuclei (sqlmap gated)."""
+    consolidate_target = consolidate_url_target(target_url)
+    return [
+        {
+            "tool": "dalfox",
+            "label": "U3: XSS scanning (dalfox)",
+            "required": False,
+        },
+        {
+            "tool": "nuclei",
+            "consolidate": consolidate_target,
+            "context_key": "urls_file",
+            "label": "U3: Template scanning (nuclei)",
+            "required": False,
+        },
+    ]
+
+
+def build_url_full_steps(target_url):
+    """Full URL workflow: U1 (recon) + U2 (params/fuzz) + U3 (attack)."""
+    return (build_url_recon_steps(target_url) +
+            build_url_params_steps(target_url) +
+            build_url_attack_steps(target_url))
+
+
 # Global runner instance (set in main)
 runner = None
 pipeline_runner = None
@@ -1220,6 +1352,7 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/screenshots":     self.handle_screenshots_list,
             "/api/roi":             self.handle_roi,
             "/api/promoted":        self.handle_promoted,
+            "/api/findings":        self.handle_findings,
         }
 
         handler = routes.get(path)
@@ -1252,6 +1385,8 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.handle_promote()
         elif path == "/api/demote":
             self.handle_demote()
+        elif path == "/api/scope/check":
+            self.handle_scope_check()
         elif path.startswith("/api/"):
             self.send_json({"error": "not found"}, 404)
         else:
@@ -1394,25 +1529,67 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "target required"}, 400)
             return
 
-        # Build pipeline steps
-        pipeline_map = {
+        # Wildcard pipelines
+        wildcard_map = {
             "r1": (build_r1_steps, 1),
             "r2": (build_r2_steps, 2),
             "r3": (build_r3_steps, 3),
             "wildcard": (build_wildcard_steps, 0),
         }
-        entry = pipeline_map.get(pipeline_name)
-        if not entry:
+        # URL pipelines
+        url_map = {
+            "url-recon": ("u1", 1),
+            "url-params": ("u2", 2),
+            "url-attack": ("u3", 3),
+            "url": ("full", 0),
+        }
+
+        if pipeline_name in wildcard_map:
+            build_fn, round_num = wildcard_map[pipeline_name]
+
+            # Check dns wordlist for R2/wildcard
+            if pipeline_name in ("r2", "wildcard"):
+                dns_wl = runner._resolve_dns_wordlist()
+                if not dns_wl and pipeline_name == "r2":
+                    self.send_json({"error": "No DNS wordlist found. Set dns_wordlist in config/paths.json"}, 400)
+                    return
+
+            steps = build_fn(None)
+
+        elif pipeline_name in url_map:
+            phase, round_num = url_map[pipeline_name]
+
+            # Scope gating for URL workflows
+            if not is_in_scope(target, self.cfg):
+                self.send_json({
+                    "error": f"Target out of scope: {target}. "
+                             "Update allowed_domains in config/scope.json."
+                }, 403)
+                return
+
+            # Attack pipelines require confirmed=true
+            if pipeline_name in ("url-attack", "url") and not body.get("confirmed"):
+                # Return the steps that will run so frontend can show confirmation
+                attack_tools = ["dalfox", "nuclei"]
+                self.send_json({
+                    "needs_confirm": True,
+                    "pipeline": pipeline_name,
+                    "target": target,
+                    "attack_tools": attack_tools,
+                })
+                return
+
+            if phase == "u1":
+                steps = build_url_recon_steps(target)
+            elif phase == "u2":
+                steps = build_url_params_steps(target)
+            elif phase == "u3":
+                steps = build_url_attack_steps(target)
+            else:
+                steps = build_url_full_steps(target)
+        else:
             self.send_json({"error": f"unknown pipeline: {pipeline_name}"}, 400)
             return
-        build_fn, round_num = entry
-
-        # Check dns wordlist for R2/wildcard
-        if pipeline_name in ("r2", "wildcard"):
-            dns_wl = runner._resolve_dns_wordlist()
-            if not dns_wl and pipeline_name == "r2":
-                self.send_json({"error": "No DNS wordlist found. Set dns_wordlist in config/paths.json"}, 400)
-                return
 
         # Create scan record
         with _db_lock:
@@ -1421,8 +1598,6 @@ class ReconHandler(SimpleHTTPRequestHandler):
                 (target, target_type, round_num, self.cfg.active_profile, "running"))
             self.db.commit()
             scan_id = cursor.lastrowid
-
-        steps = build_fn(scan_id)
 
         def run():
             try:
@@ -1536,6 +1711,38 @@ class ReconHandler(SimpleHTTPRequestHandler):
                 "FROM urls WHERE promoted_to_target=1 ORDER BY roi_score DESC"
             ).fetchall()
         self.send_json({"promoted": [dict(r) for r in rows], "count": len(rows)})
+
+    def handle_scope_check(self):
+        """POST /api/scope/check — check if a URL is in scope."""
+        body = self.read_body_json()
+        if not body:
+            return
+        url = body.get("url", "").strip()
+        if not url:
+            self.send_json({"error": "url required"}, 400)
+            return
+        in_scope = is_in_scope(url, self.cfg)
+        allowed = self.cfg.scope.get("allowed_domains", [])
+        self.send_json({
+            "url": url,
+            "in_scope": in_scope,
+            "scope_configured": len(allowed) > 0,
+            "allowed_domains": allowed,
+        })
+
+    def handle_findings(self):
+        """GET /api/findings — return all vulnerability findings."""
+        with _db_lock:
+            rows = self.db.execute(
+                "SELECT id, url, vector, template_id, severity, tool, "
+                "request, response, sources, scan_id, created_at "
+                "FROM findings ORDER BY "
+                "CASE severity "
+                "  WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+                "  WHEN 'medium' THEN 2 WHEN 'low' THEN 3 "
+                "  WHEN 'info' THEN 4 ELSE 5 END, created_at DESC"
+            ).fetchall()
+        self.send_json({"findings": [dict(r) for r in rows], "count": len(rows)})
 
     def handle_screenshots_list(self):
         """GET /api/screenshots — list available screenshots."""

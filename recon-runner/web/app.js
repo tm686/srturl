@@ -157,10 +157,11 @@ function connectSSE() {
         state.activeTool = null;
         updateRunningUI();
         appendOutput(`\n=== Pipeline complete (${d.steps} steps) ===`, "output-pipeline");
-        // Refresh data tables + ROI
+        // Refresh data tables + ROI + findings
         loadSubdomains();
         loadUrls();
         loadROI();
+        loadFindings();
     });
 
     evtSource.addEventListener("error", (e) => {
@@ -306,12 +307,15 @@ function updateTargetTypeUI() {
     state.targetType = dom.targetType.value;
     const promotedSelect = $("#promoted-select");
 
+    const urlPipelineSelect = $("#url-pipeline-select");
+
     if (state.targetType === "wildcard") {
         dom.roiSection.classList.remove("hidden");
         dom.findingsSection.classList.add("hidden");
         dom.target.placeholder = "example.com";
         dom.pipelineSelect.classList.remove("hidden");
         if (promotedSelect) promotedSelect.classList.add("hidden");
+        if (urlPipelineSelect) urlPipelineSelect.classList.add("hidden");
     } else {
         dom.roiSection.classList.add("hidden");
         dom.findingsSection.classList.remove("hidden");
@@ -321,6 +325,8 @@ function updateTargetTypeUI() {
             promotedSelect.classList.remove("hidden");
             loadPromoted();
         }
+        if (urlPipelineSelect) urlPipelineSelect.classList.remove("hidden");
+        loadFindings();
     }
 
     renderToolButtons();
@@ -441,6 +447,12 @@ function bindEvents() {
         btnROI.addEventListener("click", recalculateROI);
     }
 
+    // Attack confirm modal
+    const btnConfirm = $("#btn-confirm-attack");
+    const btnCancel = $("#btn-cancel-attack");
+    if (btnConfirm) btnConfirm.addEventListener("click", confirmAttack);
+    if (btnCancel) btnCancel.addEventListener("click", cancelAttack);
+
     // Promote buttons in ROI table (event delegation)
     const roiTable = $("#roi-table");
     if (roiTable) {
@@ -491,7 +503,8 @@ function bindEvents() {
             const pipeline = dom.pipelineSelect.value;
             runPipeline(pipeline, target);
         } else {
-            appendOutput("[*] URL workflow not yet implemented — use individual tool buttons", "output-info");
+            const pipeline = ($("#url-pipeline-select") || {}).value || "url";
+            runUrlPipeline(pipeline, target);
         }
     });
 }
@@ -517,6 +530,117 @@ async function runPipeline(name, target) {
     } catch (err) {
         appendOutput(`[!] Failed to start pipeline: ${err.message}`, "output-error");
     }
+}
+
+// ---------------------------------------------------------------------------
+// URL workflow pipeline
+// ---------------------------------------------------------------------------
+
+async function runUrlPipeline(name, target) {
+    if (state.running) return;
+    try {
+        const data = await apiPost("/api/pipeline", {
+            pipeline: name,
+            target: target,
+            target_type: "url",
+        });
+        if (data.needs_confirm) {
+            // Show attack confirmation modal
+            showAttackConfirm(data.pipeline, data.target, data.attack_tools);
+        } else if (data.error) {
+            appendOutput(`[!] ${data.error}`, "output-error");
+        } else {
+            appendOutput(`[*] URL pipeline "${name}" started (scan ${data.scan_id})`, "output-info");
+            appendOutput(`    steps: ${data.steps.join(" -> ")}`, "output-stderr");
+        }
+    } catch (err) {
+        appendOutput(`[!] Failed to start URL pipeline: ${err.message}`, "output-error");
+    }
+}
+
+function showAttackConfirm(pipeline, target, tools) {
+    const modal = $("#attack-confirm-modal");
+    const targetSpan = $("#confirm-target");
+    const toolsSpan = $("#confirm-tools");
+    if (!modal || !targetSpan || !toolsSpan) return;
+
+    targetSpan.textContent = target;
+    toolsSpan.textContent = tools.join(", ");
+    modal.classList.remove("hidden");
+
+    // Store for confirm handler
+    state.pendingAttack = {pipeline, target};
+}
+
+async function confirmAttack() {
+    const modal = $("#attack-confirm-modal");
+    if (modal) modal.classList.add("hidden");
+    if (!state.pendingAttack) return;
+
+    const {pipeline, target} = state.pendingAttack;
+    state.pendingAttack = null;
+
+    try {
+        const data = await apiPost("/api/pipeline", {
+            pipeline: pipeline,
+            target: target,
+            target_type: "url",
+            confirmed: true,
+        });
+        if (data.error) {
+            appendOutput(`[!] ${data.error}`, "output-error");
+        } else {
+            appendOutput(`[*] URL pipeline "${pipeline}" started with attack phase (scan ${data.scan_id})`, "output-info");
+            appendOutput(`    steps: ${data.steps.join(" -> ")}`, "output-stderr");
+        }
+    } catch (err) {
+        appendOutput(`[!] Failed to start pipeline: ${err.message}`, "output-error");
+    }
+}
+
+function cancelAttack() {
+    const modal = $("#attack-confirm-modal");
+    if (modal) modal.classList.add("hidden");
+    state.pendingAttack = null;
+    appendOutput("[*] Attack cancelled", "output-warn");
+}
+
+// ---------------------------------------------------------------------------
+// Findings
+// ---------------------------------------------------------------------------
+
+async function loadFindings() {
+    try {
+        const data = await api("/api/findings");
+        renderFindings(data.findings || []);
+    } catch { /* ignore */ }
+}
+
+function renderFindings(findings) {
+    const container = $("#findings-table");
+    if (!container) return;
+    if (findings.length === 0) {
+        container.innerHTML = '<span class="output-stderr">No findings yet — run a URL workflow</span>';
+        return;
+    }
+
+    let html = `<div class="data-table-header">${findings.length} findings</div>`;
+    html += '<table class="data-table"><thead><tr>';
+    html += '<th>Severity</th><th>URL</th><th>Vector</th><th>Template</th><th>Tool</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const f of findings) {
+        const sevCls = `severity-${(f.severity || "info").toLowerCase()}`;
+        html += `<tr>`;
+        html += `<td><span class="severity-badge ${sevCls}">${esc(f.severity || "info")}</span></td>`;
+        html += `<td class="url-cell">${esc(f.url)}</td>`;
+        html += `<td>${esc(f.vector || "—")}</td>`;
+        html += `<td>${esc(f.template_id || "—")}</td>`;
+        html += `<td>${esc(f.tool || "—")}</td>`;
+        html += `</tr>`;
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
 }
 
 // ---------------------------------------------------------------------------

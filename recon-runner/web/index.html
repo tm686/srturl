@@ -30,6 +30,12 @@
                     <option value="r2">R2: DNS Brute</option>
                     <option value="r3">R3: Crawl</option>
                 </select>
+                <select id="url-pipeline-select" class="hidden">
+                    <option value="url">Full URL Workflow (U1+U2+U3)</option>
+                    <option value="url-recon">U1: Collect + Crawl</option>
+                    <option value="url-params">U2: Params + Fuzz</option>
+                    <option value="url-attack">U3: Attack (dalfox+nuclei)</option>
+                </select>
                 <select id="promoted-select" class="hidden">
                     <option value="">— select promoted target —</option>
                 </select>

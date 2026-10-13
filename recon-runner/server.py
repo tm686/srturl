@@ -28,6 +28,7 @@ from urllib.parse import urlparse, parse_qs
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     """Handle each request in a new thread — required for SSE + concurrent API."""
     daemon_threads = True
+    allow_reuse_address = True
 
 import doctor
 
@@ -916,10 +917,146 @@ class PipelineRunner:
                 except OSError:
                     pass
 
+        # Auto-compute ROI scores after pipeline completes
+        try:
+            roi_results = compute_roi_scores(self.runner.db, self.runner.cfg)
+            event_bus.publish("pipeline_info", {
+                "message": f"ROI scores computed for {len(roi_results)} URLs",
+            })
+        except Exception as e:
+            event_bus.publish("pipeline_info", {
+                "message": f"ROI scoring failed: {e}",
+            })
+
         event_bus.publish("pipeline_done", {
             "message": "Pipeline complete",
             "steps": total,
         })
+
+
+# ---------------------------------------------------------------------------
+# ROI scoring engine
+# ---------------------------------------------------------------------------
+
+def compute_roi_scores(db, cfg):
+    """Compute ROI score for every URL in the database.
+
+    Scoring signals (from config/roi.json):
+    - Missing security headers (per header)
+    - Technology stack complexity (per tech detected)
+    - Endpoint count (tiered)
+    - TLS/SSL issues
+    - Interesting status codes (401/403 suggest auth surface)
+    - Application complexity (title/server signals)
+    Returns list of (url, score, breakdown) tuples.
+    """
+    roi_cfg = cfg.roi
+    weights = roi_cfg.get("weights", {})
+    thresholds = roi_cfg.get("endpoint_thresholds", {"low": 5, "mid": 20, "high": 50})
+    security_headers = roi_cfg.get("security_headers", [])
+
+    with _db_lock:
+        rows = db.execute(
+            "SELECT url, status_code, title, tech, server, tls_state, "
+            "missing_headers, endpoint_count FROM urls"
+        ).fetchall()
+
+    results = []
+    for row in rows:
+        score = 0
+        breakdown = {}
+
+        # 1. Missing security headers
+        try:
+            missing = json.loads(row["missing_headers"]) if row["missing_headers"] else []
+        except (json.JSONDecodeError, TypeError):
+            missing = []
+        # Count headers from our security_headers list that are missing
+        header_score = 0
+        if missing:
+            header_score = len(missing) * weights.get("missing_security_header", 10)
+        else:
+            # httpx doesn't always populate missing_headers;
+            # if empty and we have a live URL, assume some are missing
+            pass
+        if header_score:
+            score += header_score
+            breakdown["missing_headers"] = header_score
+
+        # 2. Technology detected
+        tech = row["tech"] or ""
+        if tech:
+            tech_count = len([t.strip() for t in tech.split(",") if t.strip()])
+            tech_score = tech_count * weights.get("technology_detected", 3)
+            score += tech_score
+            breakdown["tech"] = tech_score
+
+        # 3. Endpoint count (tiered)
+        ep_count = row["endpoint_count"] or 0
+        if ep_count >= thresholds.get("high", 50):
+            ep_score = ep_count * weights.get("endpoint_count_high", 3)
+        elif ep_count >= thresholds.get("mid", 20):
+            ep_score = ep_count * weights.get("endpoint_count_mid", 2)
+        elif ep_count >= thresholds.get("low", 5):
+            ep_score = ep_count * weights.get("endpoint_count_low", 1)
+        else:
+            ep_score = 0
+        if ep_score:
+            score += ep_score
+            breakdown["endpoints"] = ep_score
+
+        # 4. TLS issues
+        tls = row["tls_state"] or ""
+        if tls and ("1.0" in tls or "1.1" in tls or "ssl" in tls.lower()):
+            tls_score = weights.get("ssl_tls_issue", 25)
+            score += tls_score
+            breakdown["tls_issue"] = tls_score
+
+        # 5. Interesting status codes (suggests auth surface / hidden content)
+        status = row["status_code"] or 0
+        if status in (401, 403):
+            auth_score = 15
+            score += auth_score
+            breakdown["auth_surface"] = auth_score
+        elif status in (500, 502, 503):
+            err_score = weights.get("error_page_info_leak", 50)
+            score += err_score
+            breakdown["error_page"] = err_score
+
+        # 6. App complexity (title suggests dynamic app)
+        title = (row["title"] or "").lower()
+        server = (row["server"] or "").lower()
+        complexity_score = 0
+        if any(kw in title for kw in ["dashboard", "admin", "login", "portal",
+                                       "api", "app", "console", "manage"]):
+            complexity_score += weights.get("app_complexity", 10)
+        if any(kw in server for kw in ["nginx", "apache", "tomcat", "express",
+                                        "gunicorn", "uvicorn"]):
+            complexity_score += 5  # real app server (not just CDN)
+        if complexity_score:
+            score += complexity_score
+            breakdown["complexity"] = complexity_score
+
+        # Update DB
+        with _db_lock:
+            db.execute("UPDATE urls SET roi_score=? WHERE url=?", (score, row["url"]))
+
+        results.append({
+            "url": row["url"],
+            "score": score,
+            "breakdown": breakdown,
+            "status_code": status,
+            "title": row["title"] or "",
+            "tech": tech,
+            "server": row["server"] or "",
+        })
+
+    with _db_lock:
+        db.commit()
+
+    # Sort by score descending
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1080,6 +1217,7 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/subdomains":      self.handle_subdomains,
             "/api/urls":            self.handle_urls,
             "/api/screenshots":     self.handle_screenshots_list,
+            "/api/roi":             self.handle_roi,
         }
 
         handler = routes.get(path)
@@ -1106,6 +1244,8 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.handle_run_pipeline()
         elif path == "/api/stop":
             self.handle_stop_tool()
+        elif path == "/api/roi/recalculate":
+            self.handle_roi_recalculate()
         elif path.startswith("/api/"):
             self.send_json({"error": "not found"}, 404)
         else:
@@ -1321,6 +1461,21 @@ class ReconHandler(SimpleHTTPRequestHandler):
                 "FROM urls ORDER BY roi_score DESC, url"
             ).fetchall()
         self.send_json({"urls": [dict(r) for r in rows], "count": len(rows)})
+
+    def handle_roi(self):
+        """GET /api/roi — return ROI-ranked URLs with score breakdowns."""
+        results = compute_roi_scores(self.db, self.cfg)
+        self.send_json({"roi": results, "count": len(results)})
+
+    def handle_roi_recalculate(self):
+        """POST /api/roi/recalculate — recompute all ROI scores."""
+        results = compute_roi_scores(self.db, self.cfg)
+        self.send_json({
+            "ok": True,
+            "message": f"ROI scores computed for {len(results)} URLs",
+            "roi": results,
+            "count": len(results),
+        })
 
     def handle_screenshots_list(self):
         """GET /api/screenshots — list available screenshots."""

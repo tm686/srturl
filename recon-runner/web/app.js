@@ -156,9 +156,10 @@ function connectSSE() {
         state.activeTool = null;
         updateRunningUI();
         appendOutput(`\n=== Pipeline complete (${d.steps} steps) ===`, "output-pipeline");
-        // Refresh data tables
+        // Refresh data tables + ROI
         loadSubdomains();
         loadUrls();
+        loadROI();
     });
 
     evtSource.addEventListener("error", (e) => {
@@ -428,6 +429,11 @@ function bindEvents() {
         dom.btnStop.addEventListener("click", stopTool);
     }
 
+    const btnROI = $("#btn-recalculate-roi");
+    if (btnROI) {
+        btnROI.addEventListener("click", recalculateROI);
+    }
+
     // Tool buttons — individual run
     dom.toolButtons.addEventListener("click", (e) => {
         const btn = e.target.closest("button");
@@ -577,6 +583,87 @@ function esc(s) {
     const el = document.createElement("span");
     el.textContent = s;
     return el.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// ROI Report
+// ---------------------------------------------------------------------------
+
+async function loadROI() {
+    try {
+        const data = await api("/api/roi");
+        renderROI(data.roi || []);
+    } catch { /* ignore */ }
+}
+
+async function recalculateROI() {
+    try {
+        const data = await apiPost("/api/roi/recalculate", {});
+        if (data.ok) {
+            appendOutput(`[*] ${data.message}`, "output-info");
+            renderROI(data.roi || []);
+        }
+    } catch (err) {
+        appendOutput(`[!] ROI recalculation failed: ${err.message}`, "output-error");
+    }
+}
+
+function roiTier(score) {
+    if (score >= 80) return { label: "HIGH", cls: "roi-high" };
+    if (score >= 40) return { label: "MED", cls: "roi-med" };
+    if (score > 0)   return { label: "LOW", cls: "roi-low" };
+    return { label: "—", cls: "roi-none" };
+}
+
+function renderROI(results) {
+    const summary = $("#roi-summary");
+    const table = $("#roi-table");
+    if (!summary || !table) return;
+
+    if (results.length === 0) {
+        summary.innerHTML = '<span class="output-stderr">No ROI data yet — run a pipeline first</span>';
+        table.innerHTML = "";
+        return;
+    }
+
+    // Summary stats
+    const high = results.filter(r => r.score >= 80).length;
+    const med = results.filter(r => r.score >= 40 && r.score < 80).length;
+    const low = results.filter(r => r.score > 0 && r.score < 40).length;
+    const topScore = results[0]?.score || 0;
+
+    summary.innerHTML = `
+        <div class="roi-stats">
+            <span class="roi-stat"><span class="roi-badge roi-high">${high}</span> High</span>
+            <span class="roi-stat"><span class="roi-badge roi-med">${med}</span> Med</span>
+            <span class="roi-stat"><span class="roi-badge roi-low">${low}</span> Low</span>
+            <span class="roi-stat">${results.length} total — top score: ${topScore}</span>
+        </div>
+    `;
+
+    // Ranked table
+    let html = '<table class="data-table"><thead><tr>';
+    html += '<th>ROI</th><th>URL</th><th>Status</th><th>Title</th><th>Breakdown</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const r of results) {
+        const tier = roiTier(r.score);
+        const breakdownParts = [];
+        for (const [key, val] of Object.entries(r.breakdown || {})) {
+            breakdownParts.push(`${key}:${val}`);
+        }
+        const breakdownStr = breakdownParts.join(" ") || "—";
+
+        html += `<tr>`;
+        html += `<td><span class="roi-badge ${tier.cls}">${r.score}</span></td>`;
+        html += `<td class="url-cell">${esc(r.url)}</td>`;
+        html += `<td>${r.status_code || "—"}</td>`;
+        html += `<td>${esc(r.title || "—")}</td>`;
+        html += `<td class="roi-breakdown">${esc(breakdownStr)}</td>`;
+        html += `</tr>`;
+    }
+    html += '</tbody></table>';
+    table.innerHTML = html;
 }
 
 // ---------------------------------------------------------------------------

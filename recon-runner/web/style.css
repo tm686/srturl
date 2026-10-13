@@ -145,11 +145,53 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
     padding: 16px;
     background: var(--surface);
 }
+#roi-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
 #roi-section h2, #findings-section h2 {
     font-size: 0.95rem;
-    margin-bottom: 12px;
+    margin-bottom: 0;
     color: var(--accent);
 }
+#btn-recalculate-roi {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+#btn-recalculate-roi:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ROI badges and stats */
+.roi-stats {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 0.8rem;
+    margin-bottom: 12px;
+    color: var(--text-muted);
+}
+.roi-stat { display: flex; align-items: center; gap: 4px; }
+.roi-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: bold;
+    text-align: center;
+    min-width: 32px;
+}
+.roi-high { background: rgba(248,81,73,0.2); color: var(--red); border: 1px solid var(--red); }
+.roi-med  { background: rgba(210,153,34,0.2); color: var(--orange); border: 1px solid var(--orange); }
+.roi-low  { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid var(--green); }
+.roi-none { color: var(--text-muted); }
+.roi-breakdown { font-size: 0.7rem; color: var(--text-muted); max-width: 250px; }
 #btn-export {
     margin-top: 12px;
     padding: 8px 16px;

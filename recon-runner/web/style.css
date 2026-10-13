@@ -192,15 +192,78 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
 .roi-low  { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid var(--green); }
 .roi-none { color: var(--text-muted); }
 .roi-breakdown { font-size: 0.7rem; color: var(--text-muted); max-width: 250px; }
-#btn-export {
-    margin-top: 12px;
-    padding: 8px 16px;
+/* Findings header */
+#findings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+#export-group { display: flex; gap: 8px; }
+#btn-export-json, #btn-export-csv {
+    padding: 4px 12px;
     border: 1px solid var(--accent);
-    border-radius: 4px;
+    border-radius: 3px;
     background: transparent;
     color: var(--accent);
     cursor: pointer;
     font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+#btn-export-json:hover, #btn-export-csv:hover { background: rgba(88,166,255,0.1); }
+.findings-summary {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+/* Evidence viewer */
+.btn-evidence {
+    padding: 2px 8px;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+}
+.btn-evidence:hover { background: rgba(88,166,255,0.1); }
+.evidence-modal {
+    max-width: 80vw;
+    max-height: 90vh;
+    overflow-y: auto;
+    cursor: default;
+}
+.evidence-body {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 0 0 4px 4px;
+    padding: 16px;
+}
+.evidence-section { margin-bottom: 16px; }
+.evidence-section:last-child { margin-bottom: 0; }
+.evidence-section h4 {
+    color: var(--accent);
+    font-size: 0.8rem;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.evidence-pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 12px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text);
+    max-height: 40vh;
+    overflow-y: auto;
 }
 
 /* Modal */

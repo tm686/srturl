@@ -81,9 +81,14 @@
 
         <!-- Findings (url targets) -->
         <section id="findings-section" class="hidden">
-            <h2>Findings</h2>
+            <div id="findings-header">
+                <h2>Findings</h2>
+                <div id="export-group" class="hidden">
+                    <button id="btn-export-json">Export JSON</button>
+                    <button id="btn-export-csv">Export CSV</button>
+                </div>
+            </div>
             <div id="findings-table"></div>
-            <button id="btn-export" class="hidden">Export (JSON + CSV)</button>
         </section>
     </main>
 

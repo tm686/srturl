@@ -10,7 +10,9 @@ Usage:
 """
 
 import argparse
+import csv
 import fnmatch
+import io
 import json
 import os
 import shutil
@@ -1353,6 +1355,8 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/roi":             self.handle_roi,
             "/api/promoted":        self.handle_promoted,
             "/api/findings":        self.handle_findings,
+            "/api/export/json":     self.handle_export_json,
+            "/api/export/csv":      self.handle_export_csv,
         }
 
         handler = routes.get(path)
@@ -1743,6 +1747,114 @@ class ReconHandler(SimpleHTTPRequestHandler):
                 "  WHEN 'info' THEN 4 ELSE 5 END, created_at DESC"
             ).fetchall()
         self.send_json({"findings": [dict(r) for r in rows], "count": len(rows)})
+
+    def _gather_export_data(self):
+        """Collect all evidence data for export: findings, URLs, params, scans."""
+        with _db_lock:
+            findings = [dict(r) for r in self.db.execute(
+                "SELECT id, url, vector, template_id, severity, tool, "
+                "request, response, sources, scan_id, created_at "
+                "FROM findings ORDER BY "
+                "CASE severity "
+                "  WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+                "  WHEN 'medium' THEN 2 WHEN 'low' THEN 3 "
+                "  WHEN 'info' THEN 4 ELSE 5 END, created_at DESC"
+            ).fetchall()]
+
+            urls = [dict(r) for r in self.db.execute(
+                "SELECT url, status_code, title, tech, server, tls_state, "
+                "missing_headers, endpoint_count, screenshot_path, roi_score, "
+                "promoted_to_target, sources, scan_id, created_at "
+                "FROM urls ORDER BY roi_score DESC"
+            ).fetchall()]
+
+            params = [dict(r) for r in self.db.execute(
+                "SELECT id, url, name, method, source_tool, scan_id, created_at "
+                "FROM params ORDER BY url, name"
+            ).fetchall()]
+
+            scans = [dict(r) for r in self.db.execute(
+                "SELECT id, target, target_type, round, profile, started_at, status "
+                "FROM scans ORDER BY id DESC"
+            ).fetchall()]
+
+        return {
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "summary": {
+                "findings": len(findings),
+                "urls": len(urls),
+                "params": len(params),
+                "scans": len(scans),
+            },
+            "findings": findings,
+            "urls": urls,
+            "params": params,
+            "scans": scans,
+        }
+
+    def handle_export_json(self):
+        """GET /api/export/json — download all evidence as JSON."""
+        data = self._gather_export_data()
+        payload = json.dumps(data, indent=2).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="recon-export-{time.strftime("%Y%m%d-%H%M%S")}.json"')
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def handle_export_csv(self):
+        """GET /api/export/csv — download findings as CSV."""
+        data = self._gather_export_data()
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+
+        # Findings sheet
+        writer.writerow(["# FINDINGS"])
+        writer.writerow(["id", "url", "severity", "vector", "template_id",
+                         "tool", "request", "response", "sources", "scan_id", "created_at"])
+        for f in data["findings"]:
+            writer.writerow([
+                f["id"], f["url"], f["severity"], f["vector"], f["template_id"],
+                f["tool"], f["request"], f["response"], f["sources"],
+                f["scan_id"], f["created_at"],
+            ])
+
+        writer.writerow([])
+        writer.writerow(["# URLS"])
+        writer.writerow(["url", "status_code", "title", "tech", "server",
+                         "tls_state", "missing_headers", "endpoint_count",
+                         "screenshot_path", "roi_score", "promoted_to_target",
+                         "sources", "scan_id", "created_at"])
+        for u in data["urls"]:
+            writer.writerow([
+                u["url"], u["status_code"], u["title"], u["tech"], u["server"],
+                u["tls_state"], u["missing_headers"], u["endpoint_count"],
+                u["screenshot_path"], u["roi_score"], u["promoted_to_target"],
+                u["sources"], u["scan_id"], u["created_at"],
+            ])
+
+        writer.writerow([])
+        writer.writerow(["# PARAMS"])
+        writer.writerow(["id", "url", "name", "method", "source_tool", "scan_id", "created_at"])
+        for p in data["params"]:
+            writer.writerow([
+                p["id"], p["url"], p["name"], p["method"],
+                p["source_tool"], p["scan_id"], p["created_at"],
+            ])
+
+        payload = buf.getvalue().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="recon-export-{time.strftime("%Y%m%d-%H%M%S")}.csv"')
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def handle_screenshots_list(self):
         """GET /api/screenshots — list available screenshots."""

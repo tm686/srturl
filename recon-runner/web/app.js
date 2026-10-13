@@ -447,6 +447,23 @@ function bindEvents() {
         btnROI.addEventListener("click", recalculateROI);
     }
 
+    // Export buttons
+    const btnExportJson = $("#btn-export-json");
+    const btnExportCsv = $("#btn-export-csv");
+    if (btnExportJson) btnExportJson.addEventListener("click", () => exportFindings("json"));
+    if (btnExportCsv) btnExportCsv.addEventListener("click", () => exportFindings("csv"));
+
+    // Evidence viewer (event delegation on findings table)
+    const findingsTable = $("#findings-table");
+    if (findingsTable) {
+        findingsTable.addEventListener("click", (e) => {
+            const btn = e.target.closest(".btn-evidence");
+            if (!btn) return;
+            const id = parseInt(btn.dataset.findingId, 10);
+            if (id) showEvidence(id);
+        });
+    }
+
     // Attack confirm modal
     const btnConfirm = $("#btn-confirm-attack");
     const btnCancel = $("#btn-cancel-attack");
@@ -619,28 +636,96 @@ async function loadFindings() {
 function renderFindings(findings) {
     const container = $("#findings-table");
     if (!container) return;
+
+    // Show/hide export buttons based on whether we have any data
+    const exportGroup = $("#export-group");
+    if (exportGroup) {
+        // Show export if there are findings OR urls in DB
+        exportGroup.classList.toggle("hidden", findings.length === 0);
+    }
+
     if (findings.length === 0) {
         container.innerHTML = '<span class="output-stderr">No findings yet — run a URL workflow</span>';
         return;
     }
 
-    let html = `<div class="data-table-header">${findings.length} findings</div>`;
+    // Summary by severity
+    const counts = {};
+    for (const f of findings) {
+        const sev = (f.severity || "info").toLowerCase();
+        counts[sev] = (counts[sev] || 0) + 1;
+    }
+    let html = '<div class="findings-summary">';
+    html += `<span class="data-table-header">${findings.length} findings</span>`;
+    for (const sev of ["critical", "high", "medium", "low", "info"]) {
+        if (counts[sev]) {
+            html += ` <span class="severity-badge severity-${sev}">${counts[sev]} ${sev}</span>`;
+        }
+    }
+    html += '</div>';
+
     html += '<table class="data-table"><thead><tr>';
-    html += '<th>Severity</th><th>URL</th><th>Vector</th><th>Template</th><th>Tool</th>';
+    html += '<th>Severity</th><th>URL</th><th>Vector</th><th>Template</th><th>Tool</th><th>Evidence</th>';
     html += '</tr></thead><tbody>';
 
     for (const f of findings) {
         const sevCls = `severity-${(f.severity || "info").toLowerCase()}`;
+        const hasEvidence = f.request || f.response;
         html += `<tr>`;
         html += `<td><span class="severity-badge ${sevCls}">${esc(f.severity || "info")}</span></td>`;
         html += `<td class="url-cell">${esc(f.url)}</td>`;
         html += `<td>${esc(f.vector || "—")}</td>`;
         html += `<td>${esc(f.template_id || "—")}</td>`;
         html += `<td>${esc(f.tool || "—")}</td>`;
+        if (hasEvidence) {
+            html += `<td><button class="btn-evidence" data-finding-id="${f.id}">View</button></td>`;
+        } else {
+            html += `<td><span class="output-stderr">—</span></td>`;
+        }
         html += `</tr>`;
     }
     html += '</tbody></table>';
     container.innerHTML = html;
+
+    // Store findings for evidence viewer
+    state.findings = findings;
+}
+
+function showEvidence(findingId) {
+    const finding = (state.findings || []).find(f => f.id === findingId);
+    if (!finding) return;
+
+    const overlay = document.createElement("div");
+    overlay.className = "screenshot-overlay";
+    overlay.innerHTML = `
+        <div class="evidence-modal">
+            <div class="screenshot-overlay-header">
+                <span class="url-cell">${esc(finding.url)}</span>
+                <span class="severity-badge severity-${(finding.severity||"info").toLowerCase()}">${esc(finding.severity||"info")}</span>
+                <button onclick="this.closest('.screenshot-overlay').remove()">Close</button>
+            </div>
+            <div class="evidence-body">
+                <div class="evidence-section">
+                    <h4>Request</h4>
+                    <pre class="evidence-pre">${esc(finding.request || "(no request captured)")}</pre>
+                </div>
+                <div class="evidence-section">
+                    <h4>Response</h4>
+                    <pre class="evidence-pre">${esc(finding.response || "(no response captured)")}</pre>
+                </div>
+            </div>
+        </div>
+    `;
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
+}
+
+function exportFindings(format) {
+    // Trigger download via navigating to export URL
+    window.location.href = `/api/export/${format}`;
+    appendOutput(`[*] Exporting ${format.toUpperCase()}...`, "output-info");
 }
 
 // ---------------------------------------------------------------------------

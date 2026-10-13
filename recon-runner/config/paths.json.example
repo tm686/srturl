@@ -1,0 +1,7 @@
+{
+  "bin_dir": "/usr/local/bin",
+  "nuclei_templates": "./data/nuclei-templates",
+  "wordlists_dir": "./data/wordlists",
+  "screenshots_dir": "./data/screenshots",
+  "db_path": "./data/recon.db"
+}

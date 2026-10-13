@@ -1,0 +1,57 @@
+{
+  "profiles": {
+    "stealth": {
+      "description": "SRT default. Non-disruptive, low and slow.",
+      "rate": 5,
+      "pps": 50,
+      "threads": 5,
+      "delay": 1000,
+      "timeout": 10,
+      "timeout_ms": 2000,
+      "retries": 2,
+      "level": 1,
+      "risk": 1
+    },
+    "slow": {
+      "description": "Moderate pace for permissive targets.",
+      "rate": 20,
+      "pps": 150,
+      "threads": 10,
+      "delay": 500,
+      "timeout": 8,
+      "timeout_ms": 2000,
+      "retries": 2,
+      "level": 1,
+      "risk": 1
+    },
+    "normal": {
+      "description": "Standard pace.",
+      "rate": 50,
+      "pps": 500,
+      "threads": 25,
+      "delay": 0,
+      "timeout": 5,
+      "timeout_ms": 1000,
+      "retries": 1,
+      "level": 1,
+      "risk": 1
+    },
+    "fast": {
+      "description": "Lab only. Do NOT use on SRT targets.",
+      "rate": 150,
+      "pps": 1000,
+      "threads": 50,
+      "delay": 0,
+      "timeout": 5,
+      "timeout_ms": 1000,
+      "retries": 1,
+      "level": 1,
+      "risk": 1
+    }
+  },
+  "default_profile": "stealth",
+  "nuclei_defaults": {
+    "severity": "low,medium,high,critical",
+    "tags": "cve,misconfig,exposure,ssrf,redirect,ssti,lfi,sqli,xss,graphql"
+  }
+}

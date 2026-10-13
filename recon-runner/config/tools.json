@@ -1,0 +1,128 @@
+{
+  "tools": {
+    "subfinder": {
+      "binary": "subfinder",
+      "phase": "recon",
+      "target_types": ["wildcard"],
+      "template": "subfinder -d {target} -all -rl {rate} -t {threads} -timeout {timeout} -json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "host",
+      "enabled": true,
+      "optional": false
+    },
+    "dnsx": {
+      "binary": "dnsx",
+      "phase": "recon",
+      "target_types": ["wildcard"],
+      "template": "dnsx -l {in_file} -a -resp -rl {rate} -t {threads} -retry {retries} -json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "host",
+      "enabled": true,
+      "optional": false
+    },
+    "httpx": {
+      "binary": "httpx",
+      "phase": "recon",
+      "target_types": ["wildcard", "url"],
+      "template": "httpx -l {in_file} -sc -title -td -server -tls-grab -ss -rl {rate} -threads {threads} -timeout {timeout} -retries {retries} -delay {delay} -json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "url",
+      "enabled": true,
+      "optional": false
+    },
+    "naabu": {
+      "binary": "naabu",
+      "phase": "enum",
+      "target_types": ["wildcard", "url"],
+      "template": "naabu -host {target} -s c -rate {pps} -c {threads} -timeout {timeout_ms} -json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "ip:port",
+      "enabled": true,
+      "optional": true
+    },
+    "katana": {
+      "binary": "katana",
+      "phase": "enum",
+      "target_types": ["wildcard", "url"],
+      "template": "katana -list {in_file} -jc -rl {rate} -c {threads} -delay {delay} -timeout {timeout} -jsonl",
+      "output": "stdout_jsonl",
+      "dedupe_key": "endpoint",
+      "enabled": true,
+      "optional": false
+    },
+    "gau": {
+      "binary": "gau",
+      "phase": "collect",
+      "target_types": ["url"],
+      "template": "gau {host} --threads {threads} --json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "url",
+      "enabled": true,
+      "optional": false
+    },
+    "waybackurls": {
+      "binary": "waybackurls",
+      "phase": "collect",
+      "target_types": ["url"],
+      "template": "waybackurls {host}",
+      "output": "stdout_lines",
+      "dedupe_key": "url",
+      "enabled": true,
+      "optional": false
+    },
+    "arjun": {
+      "binary": "arjun",
+      "phase": "param",
+      "target_types": ["url"],
+      "template": "arjun -u {url} -t {threads} -d {delay} --stable -oJ {out_file}",
+      "output": "file_json",
+      "dedupe_key": "url:param",
+      "enabled": true,
+      "optional": true
+    },
+    "ffuf": {
+      "binary": "ffuf",
+      "phase": "fuzz",
+      "target_types": ["url"],
+      "template": "ffuf -u {url}/FUZZ -w {wordlist} -rate {rate} -t {threads} -p {delay} -mc 200,204,301,302,307,401,403 -of json -o {out_file}",
+      "output": "file_json",
+      "dedupe_key": "url",
+      "enabled": true,
+      "optional": false
+    },
+    "dalfox": {
+      "binary": "dalfox",
+      "phase": "attack",
+      "target_types": ["url"],
+      "template": "dalfox url {url} --worker {threads} --delay {delay} --format json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "url:vector",
+      "enabled": true,
+      "optional": false
+    },
+    "nuclei": {
+      "binary": "nuclei",
+      "phase": "attack",
+      "target_types": ["wildcard", "url"],
+      "template": "nuclei -l {urls_file} -duc -t {nuclei_templates} -rl {rate} -c {threads} -timeout {timeout} -retries {retries} -severity {severity} -tags {tags} -jsonl -o {out_file}",
+      "output": "file_jsonl",
+      "dedupe_key": "url:template_id",
+      "enabled": true,
+      "optional": false
+    },
+    "sqlmap": {
+      "binary": "sqlmap",
+      "phase": "attack",
+      "target_types": ["url"],
+      "template": "sqlmap -u {url} --batch --delay {delay} --level {level} --risk {risk} --threads {threads}",
+      "output": "stdout_lines",
+      "dedupe_key": "url:param",
+      "enabled": false,
+      "optional": true,
+      "gated": true,
+      "gate_message": "sqlmap is HARD-OFF by default. Enable manually per target."
+    }
+  },
+  "screenshot_tool": "httpx",
+  "screenshot_fallback": "gowitness"
+}

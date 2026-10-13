@@ -1,0 +1,33 @@
+{
+  "weights": {
+    "ssl_tls_issue": 25,
+    "endpoint_count_low": 1,
+    "endpoint_count_mid": 2,
+    "endpoint_count_high": 3,
+    "technology_detected": 3,
+    "missing_security_header": 10,
+    "app_complexity": 10,
+    "error_page_info_leak": 50
+  },
+  "endpoint_thresholds": {
+    "low": 5,
+    "mid": 20,
+    "high": 50
+  },
+  "security_headers": [
+    "Strict-Transport-Security",
+    "Content-Security-Policy",
+    "X-Content-Type-Options",
+    "X-Frame-Options",
+    "X-XSS-Protection",
+    "Referrer-Policy",
+    "Permissions-Policy"
+  ],
+  "complexity_signals": [
+    "dynamic content",
+    "caching headers",
+    "session cookies",
+    "CORS headers",
+    "API endpoints"
+  ]
+}

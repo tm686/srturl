@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>recon-runner</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>recon-runner</h1>
+        <div id="status-bar">
+            <span id="profile-display">Profile: stealth</span>
+            <span id="doctor-status">--</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Target input -->
+        <section id="target-section">
+            <div id="target-input-group">
+                <select id="target-type">
+                    <option value="wildcard">Wildcard (*.domain.com)</option>
+                    <option value="url">URL (single target)</option>
+                </select>
+                <input type="text" id="target" placeholder="example.com or https://app.example.com">
+                <button id="btn-start">Run Workflow</button>
+            </div>
+            <div id="throttle-control">
+                <label>Throttle:</label>
+                <select id="profile-select">
+                    <option value="stealth" selected>Stealth</option>
+                    <option value="slow">Slow</option>
+                    <option value="normal">Normal</option>
+                    <option value="fast">Fast (lab only)</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- Tool panels — shown/hidden by target type -->
+        <section id="tools-panel">
+            <div id="tool-buttons"></div>
+        </section>
+
+        <!-- Output pane (SSE live stream) -->
+        <section id="output-section">
+            <div id="output-header">
+                <span id="active-tool">Idle</span>
+                <span id="active-rate"></span>
+                <button id="btn-clear-output">Clear</button>
+            </div>
+            <pre id="output-pane"></pre>
+        </section>
+
+        <!-- ROI Report (wildcard only) -->
+        <section id="roi-section" class="hidden">
+            <h2>ROI Report</h2>
+            <div id="roi-table"></div>
+        </section>
+
+        <!-- Findings (url targets) -->
+        <section id="findings-section" class="hidden">
+            <h2>Findings</h2>
+            <div id="findings-table"></div>
+            <button id="btn-export" class="hidden">Export (JSON + CSV)</button>
+        </section>
+    </main>
+
+    <!-- Attack confirmation modal -->
+    <div id="attack-confirm-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Confirm Attack Phase</h3>
+            <p>Target: <span id="confirm-target"></span></p>
+            <p>Tools: <span id="confirm-tools"></span></p>
+            <p>This will send active payloads. Confirm scope and authorization.</p>
+            <button id="btn-confirm-attack">Confirm</button>
+            <button id="btn-cancel-attack">Cancel</button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

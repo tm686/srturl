@@ -1,0 +1,6 @@
+{
+  "allowed_domains": [],
+  "allowed_ips": [],
+  "allowed_cidrs": [],
+  "notes": "Populate before each engagement. Wildcards supported (e.g. *.example.com). Attack-phase tools refuse out-of-scope targets outright."
+}

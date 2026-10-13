@@ -41,6 +41,17 @@
       "enabled": true,
       "optional": false
     },
+    "httpx-screenshot": {
+      "binary": "httpx-toolkit",
+      "binary_aliases": ["httpx-toolkit", "httpx"],
+      "phase": "recon",
+      "target_types": ["wildcard", "url"],
+      "template": "{_binary} -l {in_file} -ss -system-chrome -esb -srd {screenshots_dir} -sc -title -rl {rate} -threads {threads} -timeout {timeout} -retries {retries} -delay {delay} -st 15 -json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "url",
+      "enabled": true,
+      "optional": true
+    },
     "naabu": {
       "binary": "naabu",
       "phase": "enum",

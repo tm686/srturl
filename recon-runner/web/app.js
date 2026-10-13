@@ -528,11 +528,21 @@ function renderUrlsTable(urls) {
     if (!container) return;
     if (urls.length === 0) return; // don't overwrite subdomains table if no URLs yet
 
+    const hasScreenshots = urls.some(u => u.screenshot_path);
     let html = container.innerHTML || "";
     html += `<div class="data-table-header" style="margin-top:16px">${urls.length} live URLs</div>`;
-    html += '<table class="data-table"><thead><tr><th>URL</th><th>Status</th><th>Title</th><th>Tech</th><th>Server</th></tr></thead><tbody>';
+    html += '<table class="data-table"><thead><tr>';
+    if (hasScreenshots) html += '<th>Screenshot</th>';
+    html += '<th>URL</th><th>Status</th><th>Title</th><th>Tech</th><th>Server</th></tr></thead><tbody>';
     for (const u of urls) {
         html += `<tr>`;
+        if (hasScreenshots) {
+            if (u.screenshot_path) {
+                html += `<td class="screenshot-cell"><img src="/screenshots/${esc(u.screenshot_path)}" class="screenshot-thumb" loading="lazy" onclick="showScreenshot(this.src, '${esc(u.url)}')" title="Click to enlarge"></td>`;
+            } else {
+                html += `<td class="screenshot-cell"><span class="no-screenshot">—</span></td>`;
+            }
+        }
         html += `<td class="url-cell">${esc(u.url)}</td>`;
         html += `<td>${u.status_code || "—"}</td>`;
         html += `<td>${esc(u.title || "—")}</td>`;
@@ -542,6 +552,25 @@ function renderUrlsTable(urls) {
     }
     html += '</tbody></table>';
     container.innerHTML = html;
+}
+
+function showScreenshot(src, url) {
+    // Create fullscreen overlay for screenshot preview
+    const overlay = document.createElement("div");
+    overlay.className = "screenshot-overlay";
+    overlay.innerHTML = `
+        <div class="screenshot-overlay-content">
+            <div class="screenshot-overlay-header">
+                <span class="url-cell">${esc(url)}</span>
+                <button onclick="this.closest('.screenshot-overlay').remove()">Close</button>
+            </div>
+            <img src="${src}" alt="Screenshot of ${esc(url)}">
+        </div>
+    `;
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
 }
 
 function esc(s) {

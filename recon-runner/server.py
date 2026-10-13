@@ -371,13 +371,25 @@ def parse_httpx(obj, db, scan_id):
     missing = obj.get("missing_headers", "[]")
     if isinstance(missing, list):
         missing = json.dumps(missing)
+
+    # Normalize screenshot path — use relative path from httpx or extract from absolute
+    ss_path = obj.get("screenshot_path_rel", "") or obj.get("screenshot_path", "") or obj.get("screenshot-path", "")
+    if ss_path and "/" in ss_path:
+        # If absolute, extract the host/hash.png portion after "screenshot/" dir
+        parts = ss_path.replace("\\", "/").split("/")
+        try:
+            idx = parts.index("screenshot")
+            ss_path = "/".join(parts[idx + 1:])
+        except ValueError:
+            ss_path = "/".join(parts[-2:])  # fallback: host/hash.png
+
     upsert_url(db, url, source="httpx", scan_id=scan_id,
                status_code=obj.get("status_code") or obj.get("status-code"),
                title=obj.get("title", ""),
                tech=tech,
                server=obj.get("webserver", ""),
                tls_state=obj.get("tls", {}).get("version", "") if isinstance(obj.get("tls"), dict) else "",
-               screenshot_path=obj.get("screenshot_path", ""))
+               screenshot_path=ss_path)
     return url
 
 def parse_naabu(obj, db, scan_id):
@@ -464,6 +476,7 @@ PARSERS = {
     "dnsx": parse_dnsx,
     "dnsx-brute": parse_dnsx,
     "httpx": parse_httpx,
+    "httpx-screenshot": parse_httpx,
     "naabu": parse_naabu,
     "katana": parse_katana,
     "gau": parse_gau,
@@ -515,6 +528,16 @@ class ToolRunner:
                     return str(p)
         return ""
 
+    def _resolve_screenshots_dir(self):
+        """Resolve screenshots directory, creating if needed."""
+        configured = self.cfg.paths.get("screenshots_dir", "")
+        if configured:
+            p = Path(configured)
+        else:
+            p = SCRIPT_DIR / "data" / "screenshots"
+        p.mkdir(parents=True, exist_ok=True)
+        return str(p.resolve())
+
     def build_cmd(self, tool_name, context):
         """Substitute throttle profile + context values into tool template."""
         spec = self.cfg.get_tool_spec(tool_name)
@@ -552,6 +575,9 @@ class ToolRunner:
 
         # DNS wordlist for dnsx-brute
         values["dns_wordlist"] = self._resolve_dns_wordlist()
+
+        # Screenshots directory
+        values["screenshots_dir"] = self._resolve_screenshots_dir()
 
         values.update(context)
 
@@ -901,7 +927,7 @@ class PipelineRunner:
 # ---------------------------------------------------------------------------
 
 def build_r1_steps(scan_id):
-    """R1 passive: subfinder -> consolidate subs -> dnsx -> consolidate resolved -> httpx probe"""
+    """R1 passive: subfinder -> dnsx -> httpx probe -> screenshots"""
     return [
         {
             "tool": "subfinder",
@@ -921,6 +947,13 @@ def build_r1_steps(scan_id):
             "context_key": "in_file",
             "label": "R1: HTTP probe",
             "required": True,
+        },
+        {
+            "tool": "httpx-screenshot",
+            "consolidate": consolidate_live_urls,
+            "context_key": "in_file",
+            "label": "R1: Screenshots",
+            "required": False,
         },
     ]
 
@@ -957,7 +990,7 @@ def build_r3_steps(scan_id):
 
 
 def build_wildcard_steps(scan_id):
-    """Full wildcard pipeline: R1 (passive) + R2 (brute) + R3 (crawl)"""
+    """Full wildcard pipeline: R1 (passive) + R2 (brute) + R3 (crawl) + screenshots"""
     return [
         # R1: Passive enumeration
         {
@@ -985,6 +1018,14 @@ def build_wildcard_steps(scan_id):
             "context_key": "in_file",
             "label": "HTTP probe (all hosts)",
             "required": True,
+        },
+        # Screenshots of live URLs
+        {
+            "tool": "httpx-screenshot",
+            "consolidate": consolidate_live_urls,
+            "context_key": "in_file",
+            "label": "Screenshots",
+            "required": False,
         },
         # R3: Crawl live URLs
         {
@@ -1038,11 +1079,14 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/events":          self.handle_sse,
             "/api/subdomains":      self.handle_subdomains,
             "/api/urls":            self.handle_urls,
+            "/api/screenshots":     self.handle_screenshots_list,
         }
 
         handler = routes.get(path)
         if handler:
             handler()
+        elif path.startswith("/screenshots/"):
+            self.handle_serve_screenshot(path)
         elif path.startswith("/api/"):
             self.send_json({"error": "not found"}, 404)
         else:
@@ -1277,6 +1321,66 @@ class ReconHandler(SimpleHTTPRequestHandler):
                 "FROM urls ORDER BY roi_score DESC, url"
             ).fetchall()
         self.send_json({"urls": [dict(r) for r in rows], "count": len(rows)})
+
+    def handle_screenshots_list(self):
+        """GET /api/screenshots — list available screenshots."""
+        ss_dir = self._get_screenshots_dir()
+        ss_root = ss_dir / "screenshot"
+        if not ss_root.is_dir():
+            self.send_json({"screenshots": [], "count": 0})
+            return
+        files = []
+        for f in ss_root.rglob("*.png"):
+            # Relative path from screenshot/ dir = host/hash.png
+            rel = f.relative_to(ss_root)
+            files.append({
+                "filename": f.name,
+                "host": rel.parent.name,
+                "path": str(rel),
+                "url": f"/screenshots/{rel}",
+                "size": f.stat().st_size,
+            })
+        files.sort(key=lambda x: x["host"])
+        self.send_json({"screenshots": files, "count": len(files)})
+
+    def handle_serve_screenshot(self, path):
+        """Serve a screenshot image from the screenshots directory."""
+        rel_path = path.split("/screenshots/", 1)[-1]
+        # Sanitize — prevent path traversal
+        if ".." in rel_path or rel_path.startswith("/"):
+            self.send_json({"error": "invalid path"}, 400)
+            return
+        ss_dir = self._get_screenshots_dir()
+        # httpx stores screenshots under <srd>/screenshot/<host>/<hash>.png
+        filepath = ss_dir / "screenshot" / rel_path
+        if not filepath.is_file():
+            # Fallback: check directly in screenshots dir
+            filepath = ss_dir / rel_path
+        if not filepath.is_file():
+            self.send_json({"error": "not found"}, 404)
+            return
+        # Verify the resolved path is still under ss_dir (no symlink escape)
+        try:
+            filepath.resolve().relative_to(ss_dir.resolve())
+        except ValueError:
+            self.send_json({"error": "invalid path"}, 403)
+            return
+        ext = filepath.suffix.lower()
+        ct = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(
+            ext, "application/octet-stream")
+        data = filepath.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _get_screenshots_dir(self):
+        configured = self.cfg.paths.get("screenshots_dir", "")
+        if configured:
+            return Path(configured)
+        return SCRIPT_DIR / "data" / "screenshots"
 
     def handle_sse(self):
         """GET /api/events — Server-Sent Events stream."""

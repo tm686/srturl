@@ -133,11 +133,15 @@ def check_tools():
 
     tools = tools_data.get("tools", {})
     for name, cfg in tools.items():
-        binary = cfg.get("binary", name)
+        aliases = cfg.get("binary_aliases", [cfg.get("binary", name)])
         optional = cfg.get("optional", False)
         enabled = cfg.get("enabled", True)
 
-        path = find_binary(binary, bin_dir)
+        path = None
+        for alias in aliases:
+            path = find_binary(alias, bin_dir)
+            if path:
+                break
         if path:
             detail = f"found: {path}"
             if name in VERSION_PROBE_TOOLS:

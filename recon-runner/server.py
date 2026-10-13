@@ -91,16 +91,25 @@ class Config:
 # ---------------------------------------------------------------------------
 
 def detect_tools(cfg):
-    """Return dict of tool_name -> {available, path, enabled, optional, phase, target_types}."""
+    """Return dict of tool_name -> {available, path, binary, enabled, optional, phase, target_types}."""
     bin_dir = cfg.get_bin_dir()
     registry = cfg.tools.get("tools", {})
     result = {}
     for name, spec in registry.items():
-        binary = spec.get("binary", name)
-        path = doctor.find_binary(binary, bin_dir)
+        # Try binary_aliases first, fall back to binary field
+        aliases = spec.get("binary_aliases", [spec.get("binary", name)])
+        found_path = None
+        found_binary = None
+        for alias in aliases:
+            p = doctor.find_binary(alias, bin_dir)
+            if p:
+                found_path = p
+                found_binary = alias
+                break
         result[name] = {
-            "available": path is not None,
-            "path": path or "",
+            "available": found_path is not None,
+            "path": found_path or "",
+            "binary": found_binary or aliases[0],
             "enabled": spec.get("enabled", True),
             "optional": spec.get("optional", False),
             "gated": spec.get("gated", False),
@@ -498,6 +507,10 @@ class ToolRunner:
         template = spec.get("template", "")
         output_mode = spec.get("output", "stdout_jsonl")
 
+        # Resolve actual binary name (may differ from tool name via aliases)
+        resolved_binary = status.get("binary", spec.get("binary", tool_name))
+        template = template.replace("{_binary}", resolved_binary)
+
         # Merge profile values + nuclei defaults + context
         values = {}
         values.update(self.cfg.get_profile_values())
@@ -675,8 +688,195 @@ class ToolRunner:
                     pass
 
 
+# ---------------------------------------------------------------------------
+# Consolidation — between-round data extraction + temp file generation
+# ---------------------------------------------------------------------------
+
+def consolidate_subdomains(db, scan_id=None):
+    """Extract ALL subdomains from DB, write to temp file. Returns (filepath, count).
+    scan_id is accepted for API compatibility but not used for filtering —
+    consolidation always gathers everything known so far."""
+    with _db_lock:
+        rows = db.execute("SELECT fqdn FROM subdomains").fetchall()
+    fqdns = sorted(set(r["fqdn"] for r in rows if r["fqdn"]))
+    if not fqdns:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".subs.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(fqdns) + "\n")
+    tmp.close()
+    return tmp.name, len(fqdns)
+
+
+def consolidate_resolved(db, scan_id=None):
+    """Extract resolved subdomains (have IP), write to temp file. Returns (filepath, count)."""
+    with _db_lock:
+        rows = db.execute(
+            "SELECT fqdn FROM subdomains WHERE resolved_ip != ''").fetchall()
+    fqdns = sorted(set(r["fqdn"] for r in rows if r["fqdn"]))
+    if not fqdns:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".resolved.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(fqdns) + "\n")
+    tmp.close()
+    return tmp.name, len(fqdns)
+
+
+def consolidate_live_urls(db, scan_id=None):
+    """Extract live URLs from DB, write to temp file. Returns (filepath, count)."""
+    with _db_lock:
+        rows = db.execute("SELECT url FROM urls").fetchall()
+    urls = sorted(set(r["url"] for r in rows if r["url"]))
+    if not urls:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".urls.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(urls) + "\n")
+    tmp.close()
+    return tmp.name, len(urls)
+
+
+def consolidate_all_hosts(db, scan_id=None):
+    """Extract ALL subdomains (across all scans), write to temp file."""
+    with _db_lock:
+        rows = db.execute("SELECT fqdn FROM subdomains").fetchall()
+    fqdns = sorted(set(r["fqdn"] for r in rows if r["fqdn"]))
+    if not fqdns:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".all-subs.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(fqdns) + "\n")
+    tmp.close()
+    return tmp.name, len(fqdns)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline runner — chains tools with consolidation between steps
+# ---------------------------------------------------------------------------
+
+class PipelineRunner:
+    """Runs a sequence of (tool, consolidate_fn) steps.
+
+    Each step:
+    1. Run consolidation function to generate input file for the tool
+    2. Run the tool with the generated input
+    3. Publish pipeline progress via SSE
+    Stops if stop_flag is set or if a required tool is unavailable.
+    """
+
+    def __init__(self, tool_runner):
+        self.runner = tool_runner
+        self._stop_flag = tool_runner._stop_flag
+
+    def run_pipeline(self, steps, target, target_type, scan_id):
+        """Run a list of pipeline steps. Each step is a dict:
+        {
+            "tool": tool_name,
+            "consolidate": callable(db, scan_id) -> (filepath, count) or None,
+            "context_key": key name for the consolidated file in context ("in_file", "subs_file", etc)
+            "required": bool — if True, skip rest if tool missing
+            "label": human-readable step description
+        }
+        """
+        total = len(steps)
+        for i, step in enumerate(steps):
+            if self._stop_flag.is_set():
+                event_bus.publish("pipeline_done", {
+                    "message": "Pipeline stopped by user",
+                    "steps": i,
+                })
+                return
+
+            tool_name = step["tool"]
+            label = step.get("label", tool_name)
+            required = step.get("required", True)
+
+            event_bus.publish("pipeline_step", {
+                "step": i + 1, "total": total,
+                "tool": tool_name, "label": label,
+            })
+
+            # Check tool availability
+            status = self.runner.tool_status.get(tool_name, {})
+            if not status.get("available"):
+                msg = f"{tool_name}: binary not found"
+                if required:
+                    event_bus.publish("error", {"tool": tool_name, "message": msg + " (required — stopping pipeline)"})
+                    event_bus.publish("pipeline_done", {"message": "Pipeline stopped (missing required tool)", "steps": i})
+                    return
+                else:
+                    event_bus.publish("pipeline_info", {"message": f"Skipping {tool_name} (not installed)", "step": i + 1, "total": total})
+                    continue
+
+            # Run consolidation if specified
+            context = {"target": target, "host": target, "url": target}
+            consolidate_fn = step.get("consolidate")
+            context_key = step.get("context_key", "in_file")
+
+            if consolidate_fn:
+                filepath, count = consolidate_fn(self.runner.db, scan_id)
+                if not filepath or count == 0:
+                    event_bus.publish("pipeline_info", {
+                        "message": f"Consolidation for {tool_name}: 0 inputs — skipping",
+                        "step": i + 1, "total": total,
+                    })
+                    continue
+                context[context_key] = filepath
+                event_bus.publish("pipeline_info", {
+                    "message": f"Consolidated {count} inputs for {tool_name} -> {filepath}",
+                    "step": i + 1, "total": total,
+                })
+
+            # Run the tool (blocking)
+            self.runner.run_tool(tool_name, context, scan_id=scan_id)
+
+            # Clean up temp file
+            if consolidate_fn and filepath:
+                try:
+                    os.unlink(filepath)
+                except OSError:
+                    pass
+
+        event_bus.publish("pipeline_done", {
+            "message": "Pipeline complete",
+            "steps": total,
+        })
+
+
+# Build R1 pipeline steps
+def build_r1_steps(scan_id):
+    """R1 passive: subfinder -> consolidate subs -> dnsx -> consolidate resolved -> httpx probe"""
+    return [
+        {
+            "tool": "subfinder",
+            "label": "R1: Passive subdomain enumeration",
+            "required": True,
+        },
+        {
+            "tool": "dnsx",
+            "consolidate": consolidate_subdomains,
+            "context_key": "in_file",
+            "label": "R1: DNS resolution",
+            "required": True,
+        },
+        {
+            "tool": "httpx",
+            "consolidate": consolidate_all_hosts,
+            "context_key": "in_file",
+            "label": "R1: HTTP probe",
+            "required": True,
+        },
+    ]
+
+
 # Global runner instance (set in main)
 runner = None
+pipeline_runner = None
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +913,8 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/scans":           self.handle_list_scans,
             "/api/stats":           self.handle_stats,
             "/api/events":          self.handle_sse,
+            "/api/subdomains":      self.handle_subdomains,
+            "/api/urls":            self.handle_urls,
         }
 
         handler = routes.get(path)
@@ -733,6 +935,8 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.handle_config_reload()
         elif path == "/api/run":
             self.handle_run_tool()
+        elif path == "/api/pipeline":
+            self.handle_run_pipeline()
         elif path == "/api/stop":
             self.handle_stop_tool()
         elif path.startswith("/api/"):
@@ -863,12 +1067,80 @@ class ReconHandler(SimpleHTTPRequestHandler):
 
         self.send_json({"ok": True, "scan_id": scan_id, "tool": tool_name, "target": target})
 
+    def handle_run_pipeline(self):
+        """POST /api/pipeline — run a multi-step pipeline in background."""
+        global runner, pipeline_runner
+        body = self.read_body_json()
+        if not body:
+            return
+        target = body.get("target", "")
+        target_type = body.get("target_type", "wildcard")
+        pipeline_name = body.get("pipeline", "r1")
+
+        if not target:
+            self.send_json({"error": "target required"}, 400)
+            return
+
+        # Build pipeline steps
+        if pipeline_name == "r1":
+            build_fn = build_r1_steps
+        else:
+            self.send_json({"error": f"unknown pipeline: {pipeline_name}"}, 400)
+            return
+
+        # Create scan record
+        with _db_lock:
+            cursor = self.db.execute(
+                "INSERT INTO scans (target, target_type, round, profile, status) VALUES (?,?,?,?,?)",
+                (target, target_type, 1, self.cfg.active_profile, "running"))
+            self.db.commit()
+            scan_id = cursor.lastrowid
+
+        steps = build_fn(scan_id)
+
+        def run():
+            try:
+                pipeline_runner.run_pipeline(steps, target, target_type, scan_id)
+            finally:
+                with _db_lock:
+                    self.db.execute("UPDATE scans SET status='done' WHERE id=?", (scan_id,))
+                    self.db.commit()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        step_labels = [s["label"] for s in steps]
+        self.send_json({
+            "ok": True, "scan_id": scan_id, "pipeline": pipeline_name,
+            "target": target, "steps": step_labels,
+        })
+
     def handle_stop_tool(self):
         """POST /api/stop — stop the currently running tool."""
         global runner
         if runner:
             runner.stop()
         self.send_json({"ok": True, "message": "stop signal sent"})
+
+    def handle_subdomains(self):
+        """GET /api/subdomains — return all subdomains."""
+        with _db_lock:
+            rows = self.db.execute(
+                "SELECT fqdn, resolved_ip, sources, scan_id, created_at "
+                "FROM subdomains ORDER BY fqdn"
+            ).fetchall()
+        self.send_json({"subdomains": [dict(r) for r in rows], "count": len(rows)})
+
+    def handle_urls(self):
+        """GET /api/urls — return all discovered URLs with metadata."""
+        with _db_lock:
+            rows = self.db.execute(
+                "SELECT url, status_code, title, tech, server, tls_state, "
+                "missing_headers, endpoint_count, screenshot_path, roi_score, "
+                "promoted_to_target, sources, scan_id, created_at "
+                "FROM urls ORDER BY roi_score DESC, url"
+            ).fetchall()
+        self.send_json({"urls": [dict(r) for r in rows], "count": len(rows)})
 
     def handle_sse(self):
         """GET /api/events — Server-Sent Events stream."""
@@ -930,7 +1202,7 @@ class ReconHandler(SimpleHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def main():
-    global runner
+    global runner, pipeline_runner
 
     parser = argparse.ArgumentParser(description="recon-runner server")
     parser.add_argument("--host", default="127.0.0.1")
@@ -952,8 +1224,9 @@ def main():
     db = init_db(db_path)
     print(f"[recon-runner] database: {db_path}")
 
-    # Create runner
+    # Create runners
     runner = ToolRunner(cfg, db, tool_status)
+    pipeline_runner = PipelineRunner(runner)
 
     # Inject into handler class
     ReconHandler.cfg = cfg

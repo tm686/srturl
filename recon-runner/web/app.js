@@ -13,8 +13,11 @@ const state = {
     profileValues: {},
     targetType: "wildcard",
     running: false,
+    pipeline: false,  // true when running a multi-step pipeline
     activeTool: null,
     parsedCount: 0,
+    pipelineStep: 0,
+    pipelineTotal: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,27 +122,59 @@ function connectSSE() {
 
     evtSource.addEventListener("tool_done", (e) => {
         const d = JSON.parse(e.data);
+        const status = d.exit_code === 0 ? "completed" : `exited (${d.exit_code})`;
+        appendOutput(`\n[*] ${d.tool} ${status} — ${d.parsed} results parsed`, "output-info");
+        // Only reset running state if NOT in a pipeline (pipeline_done handles that)
+        if (!state.pipeline) {
+            state.running = false;
+            state.activeTool = null;
+            updateRunningUI();
+        }
+    });
+
+    // Pipeline events
+    evtSource.addEventListener("pipeline_step", (e) => {
+        const d = JSON.parse(e.data);
+        state.pipeline = true;
+        state.running = true;
+        state.pipelineStep = d.step;
+        state.pipelineTotal = d.total;
+        appendOutput(`\n=== Step ${d.step}/${d.total}: ${d.label} ===`, "output-pipeline");
+        updateRunningUI();
+    });
+
+    evtSource.addEventListener("pipeline_info", (e) => {
+        const d = JSON.parse(e.data);
+        appendOutput(`  [pipeline] ${d.message}`, "output-pipeline");
+    });
+
+    evtSource.addEventListener("pipeline_done", (e) => {
+        const d = JSON.parse(e.data);
+        state.pipeline = false;
         state.running = false;
         state.activeTool = null;
         updateRunningUI();
-        const status = d.exit_code === 0 ? "completed" : `exited (${d.exit_code})`;
-        appendOutput(`\n[*] ${d.tool} ${status} — ${d.parsed} results parsed`, "output-info");
+        appendOutput(`\n=== Pipeline complete (${d.steps} steps) ===`, "output-pipeline");
+        // Refresh data tables
+        loadSubdomains();
+        loadUrls();
     });
 
     evtSource.addEventListener("error", (e) => {
         if (evtSource.readyState === EventSource.CLOSED) {
-            // Reconnect after a delay
             setTimeout(connectSSE, 3000);
             return;
         }
         try {
             const d = JSON.parse(e.data);
             appendOutput(`[!] ${d.tool}: ${d.message}`, "output-error");
-            state.running = false;
-            state.activeTool = null;
-            updateRunningUI();
+            if (!state.pipeline) {
+                state.running = false;
+                state.activeTool = null;
+                updateRunningUI();
+            }
         } catch {
-            // SSE connection error, not a data event
+            // SSE connection error
         }
     });
 }
@@ -286,9 +321,13 @@ function updateTargetTypeUI() {
 
 function updateRunningUI() {
     if (state.running) {
-        dom.activeTool.textContent = state.activeTool || "Running...";
+        let label = state.activeTool || "Running...";
+        if (state.pipeline) {
+            label = `[${state.pipelineStep}/${state.pipelineTotal}] ${label}`;
+        }
+        dom.activeTool.textContent = label;
         dom.btnStart.disabled = true;
-        dom.btnStart.textContent = "Running...";
+        dom.btnStart.textContent = state.pipeline ? `Pipeline ${state.pipelineStep}/${state.pipelineTotal}` : "Running...";
         dom.btnStop.classList.remove("hidden");
     } else {
         dom.activeTool.textContent = "Idle";
@@ -401,7 +440,7 @@ function bindEvents() {
         runTool(btn.dataset.tool);
     });
 
-    // Run workflow button — for now runs first available tool (full workflow in step 4)
+    // Run Workflow button — triggers R1 pipeline for wildcard targets
     dom.btnStart.addEventListener("click", () => {
         const target = dom.target.value.trim();
         if (!target) {
@@ -409,11 +448,102 @@ function bindEvents() {
             return;
         }
         if (state.running) {
-            appendOutput("[!] A tool is already running", "output-warn");
+            appendOutput("[!] Already running", "output-warn");
             return;
         }
-        appendOutput(`[*] Full workflow not yet implemented — use individual tool buttons`, "output-info");
+        if (state.targetType === "wildcard") {
+            runPipeline("r1", target);
+        } else {
+            appendOutput("[*] URL workflow not yet implemented — use individual tool buttons", "output-info");
+        }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
+
+async function runPipeline(name, target) {
+    if (state.running) return;
+    try {
+        const data = await apiPost("/api/pipeline", {
+            pipeline: name,
+            target: target,
+            target_type: state.targetType,
+        });
+        if (data.error) {
+            appendOutput(`[!] ${data.error}`, "output-error");
+        } else {
+            appendOutput(`[*] Pipeline "${name}" started (scan ${data.scan_id})`, "output-info");
+            appendOutput(`    steps: ${data.steps.join(" -> ")}`, "output-stderr");
+        }
+    } catch (err) {
+        appendOutput(`[!] Failed to start pipeline: ${err.message}`, "output-error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data tables — subdomains + URLs (loaded after pipeline / on demand)
+// ---------------------------------------------------------------------------
+
+async function loadSubdomains() {
+    try {
+        const data = await api("/api/subdomains");
+        renderSubdomainsTable(data.subdomains || []);
+    } catch { /* ignore */ }
+}
+
+function renderSubdomainsTable(subs) {
+    const container = $("#roi-table");
+    if (!container) return;
+    if (subs.length === 0) {
+        container.innerHTML = '<span class="output-stderr">No subdomains yet</span>';
+        return;
+    }
+    let html = `<div class="data-table-header">${subs.length} subdomains</div>`;
+    html += '<table class="data-table"><thead><tr><th>FQDN</th><th>IP</th><th>Sources</th></tr></thead><tbody>';
+    for (const s of subs) {
+        let sources = "[]";
+        try { sources = JSON.parse(s.sources).join(", "); } catch {}
+        html += `<tr><td>${esc(s.fqdn)}</td><td>${esc(s.resolved_ip || "—")}</td><td>${esc(sources)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+async function loadUrls() {
+    try {
+        const data = await api("/api/urls");
+        renderUrlsTable(data.urls || []);
+    } catch { /* ignore */ }
+}
+
+function renderUrlsTable(urls) {
+    // For wildcard mode, show in ROI section (below subdomains); for url mode, show in findings
+    const container = state.targetType === "wildcard" ? $("#roi-table") : $("#findings-table");
+    if (!container) return;
+    if (urls.length === 0) return; // don't overwrite subdomains table if no URLs yet
+
+    let html = container.innerHTML || "";
+    html += `<div class="data-table-header" style="margin-top:16px">${urls.length} live URLs</div>`;
+    html += '<table class="data-table"><thead><tr><th>URL</th><th>Status</th><th>Title</th><th>Tech</th><th>Server</th></tr></thead><tbody>';
+    for (const u of urls) {
+        html += `<tr>`;
+        html += `<td class="url-cell">${esc(u.url)}</td>`;
+        html += `<td>${u.status_code || "—"}</td>`;
+        html += `<td>${esc(u.title || "—")}</td>`;
+        html += `<td>${esc(u.tech || "—")}</td>`;
+        html += `<td>${esc(u.server || "—")}</td>`;
+        html += `</tr>`;
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function esc(s) {
+    const el = document.createElement("span");
+    el.textContent = s;
+    return el.innerHTML;
 }
 
 // ---------------------------------------------------------------------------

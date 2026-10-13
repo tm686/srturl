@@ -21,10 +21,11 @@
       "optional": false
     },
     "httpx": {
-      "binary": "httpx",
+      "binary": "httpx-toolkit",
+      "binary_aliases": ["httpx-toolkit", "httpx"],
       "phase": "recon",
       "target_types": ["wildcard", "url"],
-      "template": "httpx -l {in_file} -sc -title -td -server -tls-grab -ss -rl {rate} -threads {threads} -timeout {timeout} -retries {retries} -delay {delay} -json",
+      "template": "{_binary} -l {in_file} -sc -title -td -server -tls-grab -rl {rate} -threads {threads} -timeout {timeout} -retries {retries} -delay {delay} -json",
       "output": "stdout_jsonl",
       "dedupe_key": "url",
       "enabled": true,

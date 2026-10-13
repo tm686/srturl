@@ -20,6 +20,16 @@
       "enabled": true,
       "optional": false
     },
+    "dnsx-brute": {
+      "binary": "dnsx",
+      "phase": "recon",
+      "target_types": ["wildcard"],
+      "template": "dnsx -d {target} -w {dns_wordlist} -a -resp -rl {rate} -t {threads} -retry {retries} -json",
+      "output": "stdout_jsonl",
+      "dedupe_key": "host",
+      "enabled": true,
+      "optional": true
+    },
     "httpx": {
       "binary": "httpx-toolkit",
       "binary_aliases": ["httpx-toolkit", "httpx"],

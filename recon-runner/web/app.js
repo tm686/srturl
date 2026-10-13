@@ -32,6 +32,7 @@ const dom = {
     doctorStatus:   $("#doctor-status"),
     targetType:     $("#target-type"),
     target:         $("#target"),
+    pipelineSelect: $("#pipeline-select"),
     btnStart:       $("#btn-start"),
     btnStop:        $("#btn-stop"),
     profileSelect:  $("#profile-select"),
@@ -306,10 +307,12 @@ function updateTargetTypeUI() {
         dom.roiSection.classList.remove("hidden");
         dom.findingsSection.classList.add("hidden");
         dom.target.placeholder = "example.com";
+        dom.pipelineSelect.classList.remove("hidden");
     } else {
         dom.roiSection.classList.add("hidden");
         dom.findingsSection.classList.remove("hidden");
         dom.target.placeholder = "https://app.example.com";
+        dom.pipelineSelect.classList.add("hidden");
     }
 
     renderToolButtons();
@@ -440,7 +443,7 @@ function bindEvents() {
         runTool(btn.dataset.tool);
     });
 
-    // Run Workflow button — triggers R1 pipeline for wildcard targets
+    // Run Workflow button — triggers selected pipeline
     dom.btnStart.addEventListener("click", () => {
         const target = dom.target.value.trim();
         if (!target) {
@@ -452,7 +455,8 @@ function bindEvents() {
             return;
         }
         if (state.targetType === "wildcard") {
-            runPipeline("r1", target);
+            const pipeline = dom.pipelineSelect.value;
+            runPipeline(pipeline, target);
         } else {
             appendOutput("[*] URL workflow not yet implemented — use individual tool buttons", "output-info");
         }

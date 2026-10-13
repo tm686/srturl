@@ -24,6 +24,12 @@
                     <option value="url">URL (single target)</option>
                 </select>
                 <input type="text" id="target" placeholder="example.com or https://app.example.com">
+                <select id="pipeline-select">
+                    <option value="wildcard">Full Recon (R1+R2+R3)</option>
+                    <option value="r1">R1: Passive Only</option>
+                    <option value="r2">R2: DNS Brute</option>
+                    <option value="r3">R3: Crawl</option>
+                </select>
                 <button id="btn-start">Run Workflow</button>
                 <button id="btn-stop" class="hidden">Stop</button>
             </div>

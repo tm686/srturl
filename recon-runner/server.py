@@ -462,6 +462,7 @@ def parse_nuclei_file(filepath, db, scan_id):
 PARSERS = {
     "subfinder": parse_subfinder,
     "dnsx": parse_dnsx,
+    "dnsx-brute": parse_dnsx,
     "httpx": parse_httpx,
     "naabu": parse_naabu,
     "katana": parse_katana,
@@ -490,6 +491,29 @@ class ToolRunner:
         self.tool_status = tool_status
         self._current_proc = None
         self._stop_flag = threading.Event()
+
+    def _resolve_dns_wordlist(self):
+        """Find best DNS brute wordlist: paths.json > SecLists > system."""
+        # 1. Explicit config
+        configured = self.cfg.paths.get("dns_wordlist", "")
+        if configured and Path(configured).is_file():
+            return configured
+        # 2. SecLists standard paths
+        for candidate in [
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+            "/usr/share/seclists/Discovery/DNS/bitquark-subdomains-top100000.txt",
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",
+        ]:
+            if Path(candidate).is_file():
+                return candidate
+        # 3. Bundled wordlists dir
+        wl_dir = self.cfg.paths.get("wordlists_dir", "")
+        if wl_dir:
+            for name in ["dns-subdomains.txt", "subdomains.txt"]:
+                p = Path(wl_dir) / name
+                if p.is_file():
+                    return str(p)
+        return ""
 
     def build_cmd(self, tool_name, context):
         """Substitute throttle profile + context values into tool template."""
@@ -525,6 +549,9 @@ class ToolRunner:
             candidate = Path(wl_dir) / "raft-medium-directories.txt"
             if candidate.exists():
                 values["wordlist"] = str(candidate)
+
+        # DNS wordlist for dnsx-brute
+        values["dns_wordlist"] = self._resolve_dns_wordlist()
 
         values.update(context)
 
@@ -755,6 +782,27 @@ def consolidate_all_hosts(db, scan_id=None):
     return tmp.name, len(fqdns)
 
 
+def consolidate_unprobed_hosts(db, scan_id=None):
+    """Extract subdomains that have no matching URL entry yet. For R2 re-probe."""
+    with _db_lock:
+        # Get all subdomains that aren't already covered by a URL
+        rows = db.execute(
+            "SELECT s.fqdn FROM subdomains s "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM urls u WHERE u.url LIKE '%' || s.fqdn || '%'"
+            ")"
+        ).fetchall()
+    fqdns = sorted(set(r["fqdn"] for r in rows if r["fqdn"]))
+    if not fqdns:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".unprobed.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(fqdns) + "\n")
+    tmp.close()
+    return tmp.name, len(fqdns)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline runner — chains tools with consolidation between steps
 # ---------------------------------------------------------------------------
@@ -848,7 +896,10 @@ class PipelineRunner:
         })
 
 
-# Build R1 pipeline steps
+# ---------------------------------------------------------------------------
+# Pipeline definitions — R1, R2, R3, full wildcard
+# ---------------------------------------------------------------------------
+
 def build_r1_steps(scan_id):
     """R1 passive: subfinder -> consolidate subs -> dnsx -> consolidate resolved -> httpx probe"""
     return [
@@ -870,6 +921,78 @@ def build_r1_steps(scan_id):
             "context_key": "in_file",
             "label": "R1: HTTP probe",
             "required": True,
+        },
+    ]
+
+
+def build_r2_steps(scan_id):
+    """R2 active: dnsx brute force -> consolidate new subs -> httpx re-probe"""
+    return [
+        {
+            "tool": "dnsx-brute",
+            "label": "R2: DNS brute force",
+            "required": True,
+        },
+        {
+            "tool": "httpx",
+            "consolidate": consolidate_unprobed_hosts,
+            "context_key": "in_file",
+            "label": "R2: HTTP probe (new hosts)",
+            "required": True,
+        },
+    ]
+
+
+def build_r3_steps(scan_id):
+    """R3 crawl: katana crawl all live URLs for endpoint discovery"""
+    return [
+        {
+            "tool": "katana",
+            "consolidate": consolidate_live_urls,
+            "context_key": "in_file",
+            "label": "R3: Crawl live URLs",
+            "required": True,
+        },
+    ]
+
+
+def build_wildcard_steps(scan_id):
+    """Full wildcard pipeline: R1 (passive) + R2 (brute) + R3 (crawl)"""
+    return [
+        # R1: Passive enumeration
+        {
+            "tool": "subfinder",
+            "label": "R1: Passive subdomain enumeration",
+            "required": True,
+        },
+        {
+            "tool": "dnsx",
+            "consolidate": consolidate_subdomains,
+            "context_key": "in_file",
+            "label": "R1: DNS resolution",
+            "required": True,
+        },
+        # R2: DNS brute force
+        {
+            "tool": "dnsx-brute",
+            "label": "R2: DNS brute force",
+            "required": False,
+        },
+        # Combined HTTP probe (covers R1 + R2 results in one pass)
+        {
+            "tool": "httpx",
+            "consolidate": consolidate_all_hosts,
+            "context_key": "in_file",
+            "label": "HTTP probe (all hosts)",
+            "required": True,
+        },
+        # R3: Crawl live URLs
+        {
+            "tool": "katana",
+            "consolidate": consolidate_live_urls,
+            "context_key": "in_file",
+            "label": "R3: Crawl live URLs",
+            "required": False,
         },
     ]
 
@@ -1082,17 +1205,30 @@ class ReconHandler(SimpleHTTPRequestHandler):
             return
 
         # Build pipeline steps
-        if pipeline_name == "r1":
-            build_fn = build_r1_steps
-        else:
+        pipeline_map = {
+            "r1": (build_r1_steps, 1),
+            "r2": (build_r2_steps, 2),
+            "r3": (build_r3_steps, 3),
+            "wildcard": (build_wildcard_steps, 0),
+        }
+        entry = pipeline_map.get(pipeline_name)
+        if not entry:
             self.send_json({"error": f"unknown pipeline: {pipeline_name}"}, 400)
             return
+        build_fn, round_num = entry
+
+        # Check dns wordlist for R2/wildcard
+        if pipeline_name in ("r2", "wildcard"):
+            dns_wl = runner._resolve_dns_wordlist()
+            if not dns_wl and pipeline_name == "r2":
+                self.send_json({"error": "No DNS wordlist found. Set dns_wordlist in config/paths.json"}, 400)
+                return
 
         # Create scan record
         with _db_lock:
             cursor = self.db.execute(
                 "INSERT INTO scans (target, target_type, round, profile, status) VALUES (?,?,?,?,?)",
-                (target, target_type, 1, self.cfg.active_profile, "running"))
+                (target, target_type, round_num, self.cfg.active_profile, "running"))
             self.db.commit()
             scan_id = cursor.lastrowid
 

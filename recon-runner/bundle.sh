@@ -74,7 +74,7 @@ gh_release_bin "projectdiscovery/dnsx"       dnsx       "${ARCH}"
 
 # --- Other Go tools ---
 gh_release_bin "ffuf/ffuf"                   ffuf       "${ARCH}"
-gh_release_bin "hahwul/dalfox"               dalfox     "${ARCH}"
+gh_release_bin "hahwul/dalfox"               dalfox     "linux-x86_64" || true
 
 # --- Go-install tools (no release binaries) ---
 echo "[*] Building gau and waybackurls from source..."

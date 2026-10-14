@@ -19,6 +19,9 @@ const state = {
     pipelineStep: 0,
     pipelineTotal: 0,
     findings: [],
+    activeEngagement: null,
+    triageFilterROI: "",
+    triageFilterFindings: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -45,6 +48,7 @@ const dom = {
     roiSection:     $("#roi-section"),
     findingsSection:$("#findings-section"),
     parsedCount:    $("#parsed-count"),
+    statsDisplay:   $("#stats-display"),
 };
 
 // ---------------------------------------------------------------------------
@@ -69,16 +73,62 @@ async function apiPost(path, body) {
 // ---------------------------------------------------------------------------
 
 async function init() {
+    initTheme();
     await Promise.all([
         loadDoctor(),
         loadTools(),
         loadProfile(),
+        loadStats(),
+        loadEngagements(),
     ]);
     bindEvents();
     updateTargetTypeUI();
     loadPromoted();
     loadROI();
+    loadSnapshots();
     connectSSE();
+}
+
+// ---------------------------------------------------------------------------
+// Feature 1: Dashboard Stats
+// ---------------------------------------------------------------------------
+
+async function loadStats() {
+    try {
+        const data = await api("/api/stats");
+        const c = data.counts || {};
+        if (!dom.statsDisplay) return;
+        dom.statsDisplay.innerHTML =
+            `<span class="stat-item"><b>${c.subdomains||0}</b> subs</span>` +
+            `<span class="stat-item"><b>${c.urls||0}</b> urls</span>` +
+            `<span class="stat-item"><b>${c.hosts||0}</b> hosts</span>` +
+            `<span class="stat-item"><b>${c.findings||0}</b> findings</span>`;
+    } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 2: Dark/Light Theme Toggle
+// ---------------------------------------------------------------------------
+
+function initTheme() {
+    const saved = localStorage.getItem("recon-theme") || "dark";
+    document.documentElement.setAttribute("data-theme", saved);
+    updateThemeButton();
+}
+
+function toggleTheme() {
+    const current = document.documentElement.getAttribute("data-theme") || "dark";
+    const next = current === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("recon-theme", next);
+    updateThemeButton();
+}
+
+function updateThemeButton() {
+    const btn = $("#btn-theme-toggle");
+    if (!btn) return;
+    const theme = document.documentElement.getAttribute("data-theme") || "dark";
+    btn.textContent = theme === "dark" ? "Light" : "Dark";
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +178,7 @@ function connectSSE() {
         const d = JSON.parse(e.data);
         const status = d.exit_code === 0 ? "completed" : `exited (${d.exit_code})`;
         appendOutput(`\n[*] ${d.tool} ${status} — ${d.parsed} results parsed`, "output-info");
+        loadStats();
         // Only reset running state if NOT in a pipeline (pipeline_done handles that)
         if (!state.pipeline) {
             state.running = false;
@@ -159,11 +210,12 @@ function connectSSE() {
         state.activeTool = null;
         updateRunningUI();
         appendOutput(`\n=== Pipeline complete (${d.steps} steps) ===`, "output-pipeline");
-        // Refresh data tables + ROI + findings
+        // Refresh data tables + ROI + findings + stats
         loadSubdomains();
         loadUrls();
         loadROI();
         loadFindings();
+        loadStats();
     });
 
     evtSource.addEventListener("error", (e) => {
@@ -308,27 +360,39 @@ function updateProfileDisplay() {
 function updateTargetTypeUI() {
     state.targetType = dom.targetType.value;
     const promotedSelect = $("#promoted-select");
-
     const urlPipelineSelect = $("#url-pipeline-select");
+    const ipPipelineSelect = $("#ip-pipeline-select");
+    const nucleiFilters = $("#nuclei-filters");
+    const btnImport = $("#btn-import-urls");
+
+    // Hide everything first
+    dom.roiSection.classList.add("hidden");
+    dom.findingsSection.classList.add("hidden");
+    dom.pipelineSelect.classList.add("hidden");
+    if (promotedSelect) promotedSelect.classList.add("hidden");
+    if (urlPipelineSelect) urlPipelineSelect.classList.add("hidden");
+    if (ipPipelineSelect) ipPipelineSelect.classList.add("hidden");
+    if (nucleiFilters) nucleiFilters.classList.add("hidden");
+    if (btnImport) btnImport.classList.add("hidden");
 
     if (state.targetType === "wildcard") {
         dom.roiSection.classList.remove("hidden");
-        dom.findingsSection.classList.add("hidden");
         dom.target.placeholder = "example.com";
         dom.pipelineSelect.classList.remove("hidden");
-        if (promotedSelect) promotedSelect.classList.add("hidden");
-        if (urlPipelineSelect) urlPipelineSelect.classList.add("hidden");
-    } else {
-        dom.roiSection.classList.add("hidden");
+    } else if (state.targetType === "url") {
         dom.findingsSection.classList.remove("hidden");
         dom.target.placeholder = "https://app.example.com";
-        dom.pipelineSelect.classList.add("hidden");
         if (promotedSelect) {
             promotedSelect.classList.remove("hidden");
             loadPromoted();
         }
         if (urlPipelineSelect) urlPipelineSelect.classList.remove("hidden");
+        if (nucleiFilters) nucleiFilters.classList.remove("hidden");
+        if (btnImport) btnImport.classList.remove("hidden");
         loadFindings();
+    } else if (state.targetType === "ip") {
+        dom.target.placeholder = "192.168.1.0/24 or 10.0.0.1";
+        if (ipPipelineSelect) ipPipelineSelect.classList.remove("hidden");
     }
 
     renderToolButtons();
@@ -430,6 +494,23 @@ async function stopTool() {
 }
 
 // ---------------------------------------------------------------------------
+// Feature 5: Nuclei filter overrides
+// ---------------------------------------------------------------------------
+
+function getNucleiOverrides() {
+    const checked = [...$$('input[name="nuclei-sev"]:checked')].map(cb => cb.value);
+    const tags = ($("#nuclei-tags") || {}).value || "";
+    const overrides = {};
+    if (checked.length > 0 && checked.length < 5) {
+        overrides.severity = checked.join(",");
+    }
+    if (tags.trim()) {
+        overrides.tags = tags.trim();
+    }
+    return Object.keys(overrides).length > 0 ? overrides : null;
+}
+
+// ---------------------------------------------------------------------------
 // Event bindings
 // ---------------------------------------------------------------------------
 
@@ -448,6 +529,14 @@ function bindEvents() {
     if (btnROI) {
         btnROI.addEventListener("click", recalculateROI);
     }
+
+    // Feature 2: Theme toggle
+    const btnTheme = $("#btn-theme-toggle");
+    if (btnTheme) btnTheme.addEventListener("click", toggleTheme);
+
+    // Feature 4: Auto-promote
+    const btnAutoPromote = $("#btn-auto-promote");
+    if (btnAutoPromote) btnAutoPromote.addEventListener("click", autoPromote);
 
     // Export buttons
     const btnExportJson = $("#btn-export-json");
@@ -521,10 +610,48 @@ function bindEvents() {
         if (state.targetType === "wildcard") {
             const pipeline = dom.pipelineSelect.value;
             runPipeline(pipeline, target);
+        } else if (state.targetType === "ip") {
+            runIpPipeline(target);
         } else {
             const pipeline = ($("#url-pipeline-select") || {}).value || "url";
             runUrlPipeline(pipeline, target);
         }
+    });
+
+    // Feature 6: Engagement controls
+    const engSelect = $("#engagement-select");
+    if (engSelect) engSelect.addEventListener("change", () => activateEngagement(engSelect.value));
+    const btnNewEng = $("#btn-new-engagement");
+    if (btnNewEng) btnNewEng.addEventListener("click", createEngagement);
+    const btnClearEng = $("#btn-clear-engagement");
+    if (btnClearEng) btnClearEng.addEventListener("click", clearEngagement);
+
+    // Feature 8: Import URLs
+    const btnImport = $("#btn-import-urls");
+    if (btnImport) btnImport.addEventListener("click", showImportModal);
+    const btnSubmitImport = $("#btn-submit-import");
+    if (btnSubmitImport) btnSubmitImport.addEventListener("click", submitImport);
+    const btnCancelImport = $("#btn-cancel-import");
+    if (btnCancelImport) btnCancelImport.addEventListener("click", () => {
+        $("#import-urls-modal").classList.add("hidden");
+    });
+
+    // Feature 9: Snapshot/diff controls
+    const btnSaveSnap = $("#btn-save-snapshot");
+    if (btnSaveSnap) btnSaveSnap.addEventListener("click", createSnapshot);
+    const btnRunDiff = $("#btn-run-diff");
+    if (btnRunDiff) btnRunDiff.addEventListener("click", runDiff);
+
+    // Feature 3: Triage filters
+    const triageFilterROI = $("#triage-filter-roi");
+    if (triageFilterROI) triageFilterROI.addEventListener("change", () => {
+        state.triageFilterROI = triageFilterROI.value;
+        loadROI();
+    });
+    const triageFilterFindings = $("#triage-filter-findings");
+    if (triageFilterFindings) triageFilterFindings.addEventListener("change", () => {
+        state.triageFilterFindings = triageFilterFindings.value;
+        loadFindings();
     });
 }
 
@@ -558,11 +685,15 @@ async function runPipeline(name, target) {
 async function runUrlPipeline(name, target) {
     if (state.running) return;
     try {
-        const data = await apiPost("/api/pipeline", {
+        const body = {
             pipeline: name,
             target: target,
             target_type: "url",
-        });
+        };
+        const overrides = getNucleiOverrides();
+        if (overrides) body.nuclei_overrides = overrides;
+
+        const data = await apiPost("/api/pipeline", body);
         if (data.needs_confirm) {
             // Show attack confirmation modal
             showAttackConfirm(data.pipeline, data.target, data.attack_tools);
@@ -574,6 +705,29 @@ async function runUrlPipeline(name, target) {
         }
     } catch (err) {
         appendOutput(`[!] Failed to start URL pipeline: ${err.message}`, "output-error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 7: IP/CIDR pipeline
+// ---------------------------------------------------------------------------
+
+async function runIpPipeline(target) {
+    if (state.running) return;
+    try {
+        const data = await apiPost("/api/pipeline", {
+            pipeline: "ip",
+            target: target,
+            target_type: "ip",
+        });
+        if (data.error) {
+            appendOutput(`[!] ${data.error}`, "output-error");
+        } else {
+            appendOutput(`[*] IP pipeline started (scan ${data.scan_id})`, "output-info");
+            appendOutput(`    steps: ${data.steps.join(" -> ")}`, "output-stderr");
+        }
+    } catch (err) {
+        appendOutput(`[!] Failed to start IP pipeline: ${err.message}`, "output-error");
     }
 }
 
@@ -600,12 +754,16 @@ async function confirmAttack() {
     state.pendingAttack = null;
 
     try {
-        const data = await apiPost("/api/pipeline", {
+        const body = {
             pipeline: pipeline,
             target: target,
             target_type: "url",
             confirmed: true,
-        });
+        };
+        const overrides = getNucleiOverrides();
+        if (overrides) body.nuclei_overrides = overrides;
+
+        const data = await apiPost("/api/pipeline", body);
         if (data.error) {
             appendOutput(`[!] ${data.error}`, "output-error");
         } else {
@@ -625,40 +783,53 @@ function cancelAttack() {
 }
 
 // ---------------------------------------------------------------------------
-// Findings
+// Findings (Feature 10: dedup)
 // ---------------------------------------------------------------------------
 
 async function loadFindings() {
     try {
         const data = await api("/api/findings");
-        renderFindings(data.findings || []);
+        renderFindings(data.findings || [], data.total_count || 0);
     } catch { /* ignore */ }
 }
 
-function renderFindings(findings) {
+function renderFindings(findings, totalCount) {
     const container = $("#findings-table");
     if (!container) return;
 
-    // Show/hide export buttons based on whether we have any data
-    const exportGroup = $("#export-group");
-    if (exportGroup) {
-        // Show export if there are findings OR urls in DB
-        exportGroup.classList.toggle("hidden", findings.length === 0);
+    // Apply triage filter
+    const filter = state.triageFilterFindings;
+    if (filter) {
+        if (filter === "none") {
+            findings = findings.filter(f => !f.triage);
+        } else {
+            findings = findings.filter(f => f.triage === filter);
+        }
     }
+
+    // Show/hide export buttons and triage filter bar
+    const exportGroup = $("#export-group");
+    if (exportGroup) exportGroup.classList.toggle("hidden", findings.length === 0);
+    const triageBar = $("#triage-filter-findings-bar");
+    if (triageBar) triageBar.classList.toggle("hidden", findings.length === 0 && !filter);
 
     if (findings.length === 0) {
         container.innerHTML = '<span class="output-stderr">No findings yet — run a URL workflow</span>';
         return;
     }
 
-    // Summary by severity
+    // Summary by severity (Feature 10: unique vs total)
     const counts = {};
     for (const f of findings) {
         const sev = (f.severity || "info").toLowerCase();
         counts[sev] = (counts[sev] || 0) + 1;
     }
     let html = '<div class="findings-summary">';
-    html += `<span class="data-table-header">${findings.length} findings</span>`;
+    html += `<span class="data-table-header">${findings.length} unique findings`;
+    if (totalCount && totalCount > findings.length) {
+        html += ` (${totalCount} total)`;
+    }
+    html += `</span>`;
     for (const sev of ["critical", "high", "medium", "low", "info"]) {
         if (counts[sev]) {
             html += ` <span class="severity-badge severity-${sev}">${counts[sev]} ${sev}</span>`;
@@ -667,22 +838,30 @@ function renderFindings(findings) {
     html += '</div>';
 
     html += '<table class="data-table"><thead><tr>';
-    html += '<th>Severity</th><th>URL</th><th>Vector</th><th>Template</th><th>Tool</th><th>Evidence</th>';
+    html += '<th>Severity</th><th>URL</th><th>Vector</th><th>Template</th><th>Tool</th><th>Count</th><th>Triage</th><th>Notes</th><th>Evidence</th>';
     html += '</tr></thead><tbody>';
 
     for (const f of findings) {
         const sevCls = `severity-${(f.severity || "info").toLowerCase()}`;
         const hasEvidence = f.request || f.response;
+        const dupeCount = f.dupe_count || 1;
         html += `<tr>`;
         html += `<td><span class="severity-badge ${sevCls}">${esc(f.severity || "info")}</span></td>`;
         html += `<td class="url-cell">${esc(f.url)}</td>`;
-        html += `<td>${esc(f.vector || "—")}</td>`;
-        html += `<td>${esc(f.template_id || "—")}</td>`;
-        html += `<td>${esc(f.tool || "—")}</td>`;
+        html += `<td>${esc(f.vector || "\u2014")}</td>`;
+        html += `<td>${esc(f.template_id || "\u2014")}</td>`;
+        html += `<td>${esc(f.tool || "\u2014")}</td>`;
+        html += `<td>${dupeCount > 1 ? `<span class="dupe-badge">${dupeCount}x</span>` : "1"}</td>`;
+        html += `<td><select class="triage-select" onchange="window.saveNote('findings',${f.id},'triage',this.value)">`;
+        for (const [val, label] of [["","—"],["interesting","Interesting"],["investigated","Investigated"],["false_positive","False Positive"]]) {
+            html += `<option value="${val}"${f.triage === val ? " selected" : ""}>${label}</option>`;
+        }
+        html += `</select></td>`;
+        html += `<td><input class="note-input" value="${esc(f.notes || "")}" onchange="window.saveNote('findings',${f.id},'notes',this.value)" placeholder="notes"></td>`;
         if (hasEvidence) {
             html += `<td><button class="btn-evidence" data-finding-id="${f.id}">View</button></td>`;
         } else {
-            html += `<td><span class="output-stderr">—</span></td>`;
+            html += `<td><span class="output-stderr">\u2014</span></td>`;
         }
         html += `</tr>`;
     }
@@ -692,6 +871,15 @@ function renderFindings(findings) {
     // Store findings for evidence viewer
     state.findings = findings;
 }
+
+// Feature 3: Save note/triage
+window.saveNote = async function(table, id, field, value) {
+    try {
+        const body = {table, id};
+        body[field] = value;
+        await apiPost("/api/notes", body);
+    } catch { /* ignore */ }
+};
 
 function showEvidence(findingId) {
     const finding = (state.findings || []).find(f => f.id === findingId);
@@ -753,7 +941,7 @@ function renderSubdomainsTable(subs) {
     for (const s of subs) {
         let sources = "[]";
         try { sources = JSON.parse(s.sources).join(", "); } catch {}
-        html += `<tr><td>${esc(s.fqdn)}</td><td>${esc(s.resolved_ip || "—")}</td><td>${esc(sources)}</td></tr>`;
+        html += `<tr><td>${esc(s.fqdn)}</td><td>${esc(s.resolved_ip || "\u2014")}</td><td>${esc(sources)}</td></tr>`;
     }
     html += '</tbody></table>';
     container.innerHTML = html;
@@ -788,14 +976,14 @@ function renderUrlsTable(urls) {
             if (u.screenshot_path) {
                 html += `<td class="screenshot-cell"><img src="/screenshots/${esc(u.screenshot_path)}" class="screenshot-thumb" loading="lazy" onclick="showScreenshot(this.src, '${esc(u.url)}')" title="Click to enlarge"></td>`;
             } else {
-                html += `<td class="screenshot-cell"><span class="no-screenshot">—</span></td>`;
+                html += `<td class="screenshot-cell"><span class="no-screenshot">\u2014</span></td>`;
             }
         }
         html += `<td class="url-cell">${esc(u.url)}</td>`;
-        html += `<td>${u.status_code || "—"}</td>`;
-        html += `<td>${esc(u.title || "—")}</td>`;
-        html += `<td>${esc(u.tech || "—")}</td>`;
-        html += `<td>${esc(u.server || "—")}</td>`;
+        html += `<td>${u.status_code || "\u2014"}</td>`;
+        html += `<td>${esc(u.title || "\u2014")}</td>`;
+        html += `<td>${esc(u.tech || "\u2014")}</td>`;
+        html += `<td>${esc(u.server || "\u2014")}</td>`;
         html += `</tr>`;
     }
     html += '</tbody></table></div>';
@@ -830,7 +1018,7 @@ function esc(s) {
 }
 
 // ---------------------------------------------------------------------------
-// ROI Report
+// ROI Report (with Feature 3: notes/triage columns)
 // ---------------------------------------------------------------------------
 
 async function loadROI() {
@@ -856,13 +1044,27 @@ function roiTier(score) {
     if (score >= 80) return { label: "HIGH", cls: "roi-high" };
     if (score >= 40) return { label: "MED", cls: "roi-med" };
     if (score > 0)   return { label: "LOW", cls: "roi-low" };
-    return { label: "—", cls: "roi-none" };
+    return { label: "\u2014", cls: "roi-none" };
 }
 
 function renderROI(results) {
     const summary = $("#roi-summary");
     const table = $("#roi-table");
     if (!summary || !table) return;
+
+    // Apply triage filter
+    const filter = state.triageFilterROI;
+    if (filter) {
+        if (filter === "none") {
+            results = results.filter(r => !r.triage);
+        } else {
+            results = results.filter(r => r.triage === filter);
+        }
+    }
+
+    // Show triage filter bar if we have results
+    const triageBar = $("#triage-filter-bar");
+    if (triageBar) triageBar.classList.toggle("hidden", results.length === 0 && !filter);
 
     if (results.length === 0) {
         summary.innerHTML = '<span class="output-stderr">No ROI data yet — run a pipeline first</span>';
@@ -885,9 +1087,9 @@ function renderROI(results) {
         </div>
     `;
 
-    // Ranked table
+    // Ranked table with triage/notes columns
     let html = '<table class="data-table"><thead><tr>';
-    html += '<th>ROI</th><th>URL</th><th>Status</th><th>Title</th><th>Breakdown</th><th>Action</th>';
+    html += '<th>ROI</th><th>URL</th><th>Status</th><th>Title</th><th>Breakdown</th><th>Triage</th><th>Notes</th><th>Action</th>';
     html += '</tr></thead><tbody>';
 
     for (const r of results) {
@@ -896,14 +1098,20 @@ function renderROI(results) {
         for (const [key, val] of Object.entries(r.breakdown || {})) {
             breakdownParts.push(`${key}:${val}`);
         }
-        const breakdownStr = breakdownParts.join(" ") || "—";
+        const breakdownStr = breakdownParts.join(" ") || "\u2014";
 
         html += `<tr>`;
         html += `<td><span class="roi-badge ${tier.cls}">${r.score}</span></td>`;
         html += `<td class="url-cell">${esc(r.url)}</td>`;
-        html += `<td>${r.status_code || "—"}</td>`;
-        html += `<td>${esc(r.title || "—")}</td>`;
+        html += `<td>${r.status_code || "\u2014"}</td>`;
+        html += `<td>${esc(r.title || "\u2014")}</td>`;
         html += `<td class="roi-breakdown">${esc(breakdownStr)}</td>`;
+        html += `<td><select class="triage-select" onchange="window.saveNote('urls','${esc(r.url)}','triage',this.value)">`;
+        for (const [val, label] of [["","\u2014"],["interesting","Interesting"],["investigated","Investigated"],["false_positive","False Positive"]]) {
+            html += `<option value="${val}"${r.triage === val ? " selected" : ""}>${label}</option>`;
+        }
+        html += `</select></td>`;
+        html += `<td><input class="note-input" value="${esc(r.notes || "")}" onchange="window.saveNote('urls','${esc(r.url)}','notes',this.value)" placeholder="notes"></td>`;
         if (r.promoted_to_target) {
             html += `<td><span class="promoted-badge">Promoted</span></td>`;
         } else {
@@ -948,6 +1156,218 @@ async function loadPromoted() {
             sel.appendChild(opt);
         }
     } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 4: Auto-promote
+// ---------------------------------------------------------------------------
+
+async function autoPromote() {
+    try {
+        const data = await apiPost("/api/auto-promote", {});
+        if (data.ok) {
+            appendOutput(`[*] Auto-promoted ${data.promoted} URLs (threshold >= ${data.threshold})`, "output-info");
+            loadROI();
+            loadPromoted();
+            loadStats();
+        }
+    } catch (err) {
+        appendOutput(`[!] Auto-promote failed: ${err.message}`, "output-error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 6: Engagement management
+// ---------------------------------------------------------------------------
+
+async function loadEngagements() {
+    const sel = $("#engagement-select");
+    if (!sel) return;
+    try {
+        const data = await api("/api/engagements");
+        const engs = data.engagements || [];
+        sel.innerHTML = '<option value="">— none —</option>';
+        for (const e of engs) {
+            const opt = document.createElement("option");
+            opt.value = e.id;
+            opt.textContent = e.name;
+            sel.appendChild(opt);
+        }
+        if (data.active_id) {
+            sel.value = data.active_id;
+            state.activeEngagement = data.active_id;
+        }
+    } catch { /* ignore */ }
+}
+
+async function activateEngagement(id) {
+    try {
+        const engId = id ? parseInt(id, 10) : null;
+        const data = await apiPost("/api/engagement/activate", {id: engId});
+        if (data.ok) {
+            state.activeEngagement = data.active_id;
+            appendOutput(`[*] Engagement: ${data.name || "none"}`, "output-info");
+        }
+    } catch { /* ignore */ }
+}
+
+function createEngagement() {
+    const name = prompt("Engagement name:");
+    if (!name) return;
+    apiPost("/api/engagement", {name}).then(data => {
+        if (data.ok) {
+            appendOutput(`[*] Created engagement: ${name}`, "output-info");
+            loadEngagements();
+            activateEngagement(data.id);
+        } else {
+            appendOutput(`[!] ${data.error}`, "output-error");
+        }
+    });
+}
+
+function clearEngagement() {
+    const msg = state.activeEngagement
+        ? "Clear all data for the active engagement?"
+        : "Clear ALL data from the database?";
+    if (!confirm(msg)) return;
+    apiPost("/api/engagement/clear", {}).then(data => {
+        if (data.ok) {
+            appendOutput(`[*] Data cleared (${data.cleared})`, "output-info");
+            loadStats();
+            loadROI();
+            loadFindings();
+            loadSubdomains();
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Feature 8: Bulk URL import
+// ---------------------------------------------------------------------------
+
+function showImportModal() {
+    const modal = $("#import-urls-modal");
+    if (modal) modal.classList.remove("hidden");
+}
+
+async function submitImport() {
+    const textarea = $("#import-urls-textarea");
+    const modal = $("#import-urls-modal");
+    if (!textarea) return;
+    const raw = textarea.value.trim();
+    if (!raw) return;
+
+    try {
+        const data = await apiPost("/api/import/urls", {raw});
+        if (data.ok) {
+            appendOutput(`[*] Imported ${data.imported} URLs (${data.skipped} skipped)`, "output-info");
+            textarea.value = "";
+            if (modal) modal.classList.add("hidden");
+            loadUrls();
+            loadStats();
+        }
+    } catch (err) {
+        appendOutput(`[!] Import failed: ${err.message}`, "output-error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 9: Scan Diffing
+// ---------------------------------------------------------------------------
+
+async function createSnapshot() {
+    const name = prompt("Snapshot name:", `snap-${new Date().toISOString().slice(0,16).replace("T","-")}`);
+    if (!name) return;
+    try {
+        const data = await apiPost("/api/snapshot", {name});
+        if (data.ok) {
+            appendOutput(`[*] Snapshot saved: ${name} (id ${data.id})`, "output-info");
+            loadSnapshots();
+        }
+    } catch (err) {
+        appendOutput(`[!] Snapshot failed: ${err.message}`, "output-error");
+    }
+}
+
+async function loadSnapshots() {
+    const selA = $("#snapshot-select-a");
+    const selB = $("#snapshot-select-b");
+    if (!selA) return;
+    try {
+        const data = await api("/api/snapshots");
+        const snaps = data.snapshots || [];
+        selA.innerHTML = '<option value="">— snapshot A —</option>';
+        if (selB) selB.innerHTML = '<option value="">— current —</option>';
+        for (const s of snaps) {
+            const optA = document.createElement("option");
+            optA.value = s.id;
+            optA.textContent = `${s.name} (${s.created_at})`;
+            selA.appendChild(optA);
+            if (selB) {
+                const optB = document.createElement("option");
+                optB.value = s.id;
+                optB.textContent = `${s.name} (${s.created_at})`;
+                selB.appendChild(optB);
+            }
+        }
+    } catch { /* ignore */ }
+}
+
+async function runDiff() {
+    const aId = ($("#snapshot-select-a") || {}).value;
+    const bId = ($("#snapshot-select-b") || {}).value;
+    if (!aId) {
+        appendOutput("[!] Select snapshot A to compare", "output-warn");
+        return;
+    }
+    try {
+        let url = `/api/diff?a=${aId}`;
+        if (bId) url += `&b=${bId}`;
+        const data = await api(url);
+        renderDiff(data.diff || {});
+    } catch (err) {
+        appendOutput(`[!] Diff failed: ${err.message}`, "output-error");
+    }
+}
+
+function renderDiff(diff) {
+    const container = $("#diff-results");
+    if (!container) return;
+
+    let html = "";
+    for (const category of ["subdomains", "urls", "hosts", "findings"]) {
+        const d = diff[category] || {added: [], removed: []};
+        const added = d.added || [];
+        const removed = d.removed || [];
+        if (added.length === 0 && removed.length === 0) continue;
+
+        html += `<div class="diff-category">`;
+        html += `<h3>${category} <span class="output-stderr">(+${added.length} / -${removed.length})</span></h3>`;
+        if (added.length > 0) {
+            html += `<ul class="diff-list diff-added">`;
+            for (const item of added.slice(0, 100)) {
+                const label = typeof item === "string" ? item : `${item.url} [${item.template_id}]`;
+                html += `<li>+ ${esc(label)}</li>`;
+            }
+            if (added.length > 100) html += `<li class="output-stderr">... and ${added.length - 100} more</li>`;
+            html += `</ul>`;
+        }
+        if (removed.length > 0) {
+            html += `<ul class="diff-list diff-removed">`;
+            for (const item of removed.slice(0, 100)) {
+                const label = typeof item === "string" ? item : `${item.url} [${item.template_id}]`;
+                html += `<li>- ${esc(label)}</li>`;
+            }
+            if (removed.length > 100) html += `<li class="output-stderr">... and ${removed.length - 100} more</li>`;
+            html += `</ul>`;
+        }
+        html += `</div>`;
+    }
+
+    if (!html) {
+        html = '<span class="output-stderr">No differences found</span>';
+    }
+    container.innerHTML = html;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import argparse
 import csv
 import fnmatch
 import io
+import ipaddress
 import json
 import os
 import shutil
@@ -239,6 +240,89 @@ CREATE TABLE IF NOT EXISTS findings (
 _db_lock = threading.Lock()
 
 
+def _migrate_db(conn):
+    """Run incremental schema migrations using PRAGMA table_info() to detect needed changes."""
+
+    def _has_column(table, column):
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(r[1] == column for r in rows)
+
+    def _table_exists(name):
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        return row is not None
+
+    # Feature 3: Notes/triage on urls and findings
+    if not _has_column("urls", "notes"):
+        conn.execute("ALTER TABLE urls ADD COLUMN notes TEXT DEFAULT ''")
+    if not _has_column("urls", "triage"):
+        conn.execute("ALTER TABLE urls ADD COLUMN triage TEXT DEFAULT ''")
+    if not _has_column("findings", "notes"):
+        conn.execute("ALTER TABLE findings ADD COLUMN notes TEXT DEFAULT ''")
+    if not _has_column("findings", "triage"):
+        conn.execute("ALTER TABLE findings ADD COLUMN triage TEXT DEFAULT ''")
+
+    # Feature 6: Engagements table + engagement_id on scans
+    if not _table_exists("engagements"):
+        conn.execute("""
+            CREATE TABLE engagements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                scope_json TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+    if not _has_column("scans", "engagement_id"):
+        conn.execute("ALTER TABLE scans ADD COLUMN engagement_id INTEGER REFERENCES engagements(id)")
+
+    # Feature 7: Migrate scans CHECK constraint to include 'ip'
+    # Probe whether 'ip' is accepted
+    try:
+        conn.execute(
+            "INSERT INTO scans (target, target_type, profile, status) VALUES ('__probe__','ip','stealth','probe')"
+        )
+        conn.execute("DELETE FROM scans WHERE target='__probe__' AND status='probe'")
+    except sqlite3.IntegrityError:
+        # Need to recreate scans table with updated CHECK
+        conn.execute("ALTER TABLE scans RENAME TO _scans_old")
+        engagement_col = "engagement_id INTEGER REFERENCES engagements(id)," if _has_column("_scans_old", "engagement_id") else ""
+        conn.execute(f"""
+            CREATE TABLE scans (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                target      TEXT NOT NULL,
+                target_type TEXT NOT NULL CHECK(target_type IN ('wildcard','url','ip')),
+                round       INTEGER DEFAULT 0,
+                profile     TEXT NOT NULL DEFAULT 'stealth',
+                started_at  TEXT DEFAULT (datetime('now')),
+                status      TEXT NOT NULL DEFAULT 'pending',
+                {engagement_col}
+                _dummy      INTEGER DEFAULT 0
+            )
+        """)
+        # Copy data
+        old_cols = "id, target, target_type, round, profile, started_at, status"
+        if _has_column("_scans_old", "engagement_id"):
+            old_cols += ", engagement_id"
+        conn.execute(f"INSERT INTO scans ({old_cols}) SELECT {old_cols} FROM _scans_old")
+        conn.execute("DROP TABLE _scans_old")
+        # Remove the dummy column workaround — SQLite doesn't support DROP COLUMN pre-3.35
+        # The _dummy column is harmless
+
+    # Feature 9: Snapshots table
+    if not _table_exists("snapshots"):
+        conn.execute("""
+            CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+    conn.commit()
+
+
 def init_db(db_path):
     """Create/open the database and ensure schema exists."""
     db_dir = Path(db_path).parent
@@ -247,6 +331,7 @@ def init_db(db_path):
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
     conn.commit()
+    _migrate_db(conn)
     return conn
 
 
@@ -259,10 +344,13 @@ def is_in_scope(url_or_host, cfg):
 
     Returns True if scope is empty (open scope) or the host matches
     an allowed_domains entry (supports wildcards like *.example.com).
+    Also checks allowed_ips and allowed_cidrs for IP targets.
     """
     scope = cfg.scope
     allowed = scope.get("allowed_domains", [])
-    if not allowed:
+    allowed_ips = scope.get("allowed_ips", [])
+    allowed_cidrs = scope.get("allowed_cidrs", [])
+    if not allowed and not allowed_ips and not allowed_cidrs:
         return True  # no scope constraints — everything is in scope
 
     # Extract hostname from URL
@@ -272,6 +360,7 @@ def is_in_scope(url_or_host, cfg):
         host = url_or_host.split("/")[0].split(":")[0]
     host = host.lower()
 
+    # Check domain patterns
     for pattern in allowed:
         pattern = pattern.lower()
         if pattern.startswith("*."):
@@ -281,6 +370,21 @@ def is_in_scope(url_or_host, cfg):
                 return True
         elif fnmatch.fnmatch(host, pattern):
             return True
+
+    # Check IP-based scope
+    try:
+        addr = ipaddress.ip_address(host)
+        if host in allowed_ips:
+            return True
+        for cidr in allowed_cidrs:
+            try:
+                if addr in ipaddress.ip_network(cidr, strict=False):
+                    return True
+            except ValueError:
+                continue
+    except ValueError:
+        pass  # not a valid IP — already checked domain patterns
+
     return False
 
 
@@ -894,6 +998,21 @@ def consolidate_discovered_urls(db, scan_id=None):
     return tmp.name, len(urls)
 
 
+def consolidate_hosts_for_httpx(db, scan_id=None):
+    """Format ip:port lines from hosts table for httpx probing (Feature 7)."""
+    with _db_lock:
+        rows = db.execute("SELECT ip, port FROM hosts").fetchall()
+    lines = sorted(set(f"{r['ip']}:{r['port']}" for r in rows if r["ip"]))
+    if not lines:
+        return None, 0
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".ip-hosts.txt",
+                                      dir=str(SCRIPT_DIR / "data"),
+                                      delete=False)
+    tmp.write("\n".join(lines) + "\n")
+    tmp.close()
+    return tmp.name, len(lines)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline runner — chains tools with consolidation between steps
 # ---------------------------------------------------------------------------
@@ -912,7 +1031,7 @@ class PipelineRunner:
         self.runner = tool_runner
         self._stop_flag = tool_runner._stop_flag
 
-    def run_pipeline(self, steps, target, target_type, scan_id):
+    def run_pipeline(self, steps, target, target_type, scan_id, nuclei_overrides=None):
         """Run a list of pipeline steps. Each step is a dict:
         {
             "tool": tool_name,
@@ -959,6 +1078,11 @@ class PipelineRunner:
             else:
                 host = target.split("/")[0].split(":")[0]
             context = {"target": target, "host": host, "url": target}
+
+            # Feature 5: merge nuclei overrides into context for nuclei tool
+            if nuclei_overrides and tool_name == "nuclei":
+                context.update(nuclei_overrides)
+
             consolidate_fn = step.get("consolidate")
             context_key = step.get("context_key", "in_file")
 
@@ -997,6 +1121,26 @@ class PipelineRunner:
                 "message": f"ROI scoring failed: {e}",
             })
 
+        # Feature 4: Auto-promote if threshold configured
+        try:
+            threshold = self.runner.cfg.roi.get("auto_promote_threshold")
+            if threshold:
+                with _db_lock:
+                    cursor = self.runner.db.execute(
+                        "UPDATE urls SET promoted_to_target=1 WHERE roi_score >= ? AND promoted_to_target = 0",
+                        (threshold,)
+                    )
+                    promoted_count = cursor.rowcount
+                    self.runner.db.commit()
+                if promoted_count > 0:
+                    event_bus.publish("pipeline_info", {
+                        "message": f"Auto-promoted {promoted_count} URLs (threshold >= {threshold})",
+                    })
+        except Exception as e:
+            event_bus.publish("pipeline_info", {
+                "message": f"Auto-promote failed: {e}",
+            })
+
         event_bus.publish("pipeline_done", {
             "message": "Pipeline complete",
             "steps": total,
@@ -1027,7 +1171,7 @@ def compute_roi_scores(db, cfg):
     with _db_lock:
         rows = db.execute(
             "SELECT url, status_code, title, tech, server, tls_state, "
-            "missing_headers, endpoint_count, promoted_to_target FROM urls"
+            "missing_headers, endpoint_count, promoted_to_target, notes, triage FROM urls"
         ).fetchall()
 
     results = []
@@ -1119,6 +1263,8 @@ def compute_roi_scores(db, cfg):
             "tech": tech,
             "server": row["server"] or "",
             "promoted_to_target": bool(row["promoted_to_target"]),
+            "notes": row["notes"] or "",
+            "triage": row["triage"] or "",
         })
 
     with _db_lock:
@@ -1315,9 +1461,41 @@ def build_url_full_steps(target_url):
             build_url_attack_steps(target_url))
 
 
+# ---------------------------------------------------------------------------
+# IP pipeline (Feature 7)
+# ---------------------------------------------------------------------------
+
+def build_ip_steps(target):
+    """IP/CIDR pipeline: naabu port scan -> httpx probe -> screenshots."""
+    return [
+        {
+            "tool": "naabu",
+            "label": "IP: Port scanning (naabu)",
+            "required": True,
+        },
+        {
+            "tool": "httpx",
+            "consolidate": consolidate_hosts_for_httpx,
+            "context_key": "in_file",
+            "label": "IP: HTTP probe discovered services",
+            "required": True,
+        },
+        {
+            "tool": "httpx-screenshot",
+            "consolidate": consolidate_live_urls,
+            "context_key": "in_file",
+            "label": "IP: Screenshots",
+            "required": False,
+        },
+    ]
+
+
 # Global runner instance (set in main)
 runner = None
 pipeline_runner = None
+
+# Active engagement tracking (Feature 6)
+active_engagement_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -1362,6 +1540,9 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "/api/findings":        self.handle_findings,
             "/api/export/json":     self.handle_export_json,
             "/api/export/csv":      self.handle_export_csv,
+            "/api/engagements":     self.handle_list_engagements,
+            "/api/snapshots":       self.handle_list_snapshots,
+            "/api/diff":            self.handle_diff,
         }
 
         handler = routes.get(path)
@@ -1378,24 +1559,28 @@ class ReconHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
-        if path == "/api/profile":
-            self.handle_set_profile()
-        elif path == "/api/config/reload":
-            self.handle_config_reload()
-        elif path == "/api/run":
-            self.handle_run_tool()
-        elif path == "/api/pipeline":
-            self.handle_run_pipeline()
-        elif path == "/api/stop":
-            self.handle_stop_tool()
-        elif path == "/api/roi/recalculate":
-            self.handle_roi_recalculate()
-        elif path == "/api/promote":
-            self.handle_promote()
-        elif path == "/api/demote":
-            self.handle_demote()
-        elif path == "/api/scope/check":
-            self.handle_scope_check()
+        post_routes = {
+            "/api/profile":             self.handle_set_profile,
+            "/api/config/reload":       self.handle_config_reload,
+            "/api/run":                 self.handle_run_tool,
+            "/api/pipeline":            self.handle_run_pipeline,
+            "/api/stop":                self.handle_stop_tool,
+            "/api/roi/recalculate":     self.handle_roi_recalculate,
+            "/api/promote":             self.handle_promote,
+            "/api/demote":              self.handle_demote,
+            "/api/scope/check":         self.handle_scope_check,
+            "/api/notes":               self.handle_notes,
+            "/api/auto-promote":        self.handle_auto_promote,
+            "/api/engagement":          self.handle_create_engagement,
+            "/api/engagement/activate": self.handle_activate_engagement,
+            "/api/engagement/clear":    self.handle_clear_engagement,
+            "/api/import/urls":         self.handle_import_urls,
+            "/api/snapshot":            self.handle_create_snapshot,
+        }
+
+        handler = post_routes.get(path)
+        if handler:
+            handler()
         elif path.startswith("/api/"):
             self.send_json({"error": "not found"}, 404)
         else:
@@ -1475,7 +1660,7 @@ class ReconHandler(SimpleHTTPRequestHandler):
 
     def handle_run_tool(self):
         """POST /api/run — run a single tool in a background thread."""
-        global runner
+        global runner, active_engagement_id
         body = self.read_body_json()
         if not body:
             return
@@ -1501,11 +1686,11 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": f"{tool_name}: disabled"}, 400)
             return
 
-        # Create scan record
+        # Create scan record with engagement_id
         with _db_lock:
             cursor = self.db.execute(
-                "INSERT INTO scans (target, target_type, profile, status) VALUES (?,?,?,?)",
-                (target, target_type, self.cfg.active_profile, "running"))
+                "INSERT INTO scans (target, target_type, profile, status, engagement_id) VALUES (?,?,?,?,?)",
+                (target, target_type, self.cfg.active_profile, "running", active_engagement_id))
             self.db.commit()
             scan_id = cursor.lastrowid
 
@@ -1537,13 +1722,14 @@ class ReconHandler(SimpleHTTPRequestHandler):
 
     def handle_run_pipeline(self):
         """POST /api/pipeline — run a multi-step pipeline in background."""
-        global runner, pipeline_runner
+        global runner, pipeline_runner, active_engagement_id
         body = self.read_body_json()
         if not body:
             return
         target = body.get("target", "")
         target_type = body.get("target_type", "wildcard")
         pipeline_name = body.get("pipeline", "r1")
+        nuclei_overrides = body.get("nuclei_overrides")
 
         if not target:
             self.send_json({"error": "target required"}, 400)
@@ -1607,21 +1793,28 @@ class ReconHandler(SimpleHTTPRequestHandler):
                 steps = build_url_attack_steps(target)
             else:
                 steps = build_url_full_steps(target)
+
+        elif pipeline_name == "ip":
+            # Feature 7: IP/CIDR pipeline
+            target_type = "ip"
+            round_num = 0
+            steps = build_ip_steps(target)
+
         else:
             self.send_json({"error": f"unknown pipeline: {pipeline_name}"}, 400)
             return
 
-        # Create scan record
+        # Create scan record with engagement_id
         with _db_lock:
             cursor = self.db.execute(
-                "INSERT INTO scans (target, target_type, round, profile, status) VALUES (?,?,?,?,?)",
-                (target, target_type, round_num, self.cfg.active_profile, "running"))
+                "INSERT INTO scans (target, target_type, round, profile, status, engagement_id) VALUES (?,?,?,?,?,?)",
+                (target, target_type, round_num, self.cfg.active_profile, "running", active_engagement_id))
             self.db.commit()
             scan_id = cursor.lastrowid
 
         def run():
             try:
-                pipeline_runner.run_pipeline(steps, target, target_type, scan_id)
+                pipeline_runner.run_pipeline(steps, target, target_type, scan_id, nuclei_overrides=nuclei_overrides)
             finally:
                 with _db_lock:
                     self.db.execute("UPDATE scans SET status='done' WHERE id=?", (scan_id,))
@@ -1658,7 +1851,7 @@ class ReconHandler(SimpleHTTPRequestHandler):
             rows = self.db.execute(
                 "SELECT url, status_code, title, tech, server, tls_state, "
                 "missing_headers, endpoint_count, screenshot_path, roi_score, "
-                "promoted_to_target, sources, scan_id, created_at "
+                "promoted_to_target, sources, scan_id, created_at, notes, triage "
                 "FROM urls ORDER BY roi_score DESC, url"
             ).fetchall()
         self.send_json({"urls": [dict(r) for r in rows], "count": len(rows)})
@@ -1754,19 +1947,94 @@ class ReconHandler(SimpleHTTPRequestHandler):
             "allowed_domains": allowed,
         })
 
+    # Feature 3: Notes/triage
+    def handle_notes(self):
+        """POST /api/notes — update notes/triage on urls or findings."""
+        body = self.read_body_json()
+        if not body:
+            return
+        table = body.get("table", "")
+        row_id = body.get("id", "")
+        if table not in ("urls", "findings"):
+            self.send_json({"error": "table must be 'urls' or 'findings'"}, 400)
+            return
+        if not row_id:
+            self.send_json({"error": "id required"}, 400)
+            return
+
+        # Validate triage values
+        triage = body.get("triage")
+        valid_triage = ("", "interesting", "investigated", "false_positive")
+        if triage is not None and triage not in valid_triage:
+            self.send_json({"error": f"triage must be one of: {valid_triage}"}, 400)
+            return
+
+        sets = []
+        vals = []
+        if "notes" in body:
+            sets.append("notes=?")
+            vals.append(body["notes"])
+        if "triage" in body:
+            sets.append("triage=?")
+            vals.append(body["triage"])
+
+        if not sets:
+            self.send_json({"error": "notes or triage required"}, 400)
+            return
+
+        id_col = "url" if table == "urls" else "id"
+        with _db_lock:
+            self.db.execute(
+                f"UPDATE {table} SET {','.join(sets)} WHERE {id_col}=?",
+                vals + [row_id]
+            )
+            self.db.commit()
+        self.send_json({"ok": True})
+
+    # Feature 4: Auto-promote
+    def handle_auto_promote(self):
+        """POST /api/auto-promote — promote URLs above threshold."""
+        body = self.read_body_json()
+        if not body:
+            body = {}
+        threshold = body.get("threshold", self.cfg.roi.get("auto_promote_threshold", 80))
+        with _db_lock:
+            cursor = self.db.execute(
+                "UPDATE urls SET promoted_to_target=1 WHERE roi_score >= ? AND promoted_to_target = 0",
+                (threshold,)
+            )
+            count = cursor.rowcount
+            self.db.commit()
+        self.send_json({"ok": True, "promoted": count, "threshold": threshold})
+
     def handle_findings(self):
-        """GET /api/findings — return all vulnerability findings."""
+        """GET /api/findings — return all vulnerability findings with dedup (Feature 10)."""
         with _db_lock:
             rows = self.db.execute(
                 "SELECT id, url, vector, template_id, severity, tool, "
-                "request, response, sources, scan_id, created_at "
+                "request, response, sources, scan_id, created_at, notes, triage "
                 "FROM findings ORDER BY "
                 "CASE severity "
                 "  WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
                 "  WHEN 'medium' THEN 2 WHEN 'low' THEN 3 "
                 "  WHEN 'info' THEN 4 ELSE 5 END, created_at DESC"
             ).fetchall()
-        self.send_json({"findings": [dict(r) for r in rows], "count": len(rows)})
+
+        # Feature 10: Dedup by (url, template_id) — keep first occurrence, add dupe_count
+        seen = {}
+        deduped = []
+        total_count = len(rows)
+        for r in rows:
+            row_dict = dict(r)
+            key = (row_dict["url"], row_dict["template_id"])
+            if key in seen:
+                seen[key]["dupe_count"] += 1
+            else:
+                row_dict["dupe_count"] = 1
+                seen[key] = row_dict
+                deduped.append(row_dict)
+
+        self.send_json({"findings": deduped, "count": len(deduped), "total_count": total_count})
 
     def _gather_export_data(self):
         """Collect all evidence data for export: findings, URLs, params, scans."""
@@ -1935,6 +2203,234 @@ class ReconHandler(SimpleHTTPRequestHandler):
         if configured:
             return Path(configured)
         return SCRIPT_DIR / "data" / "screenshots"
+
+    # Feature 6: Engagement management
+    def handle_create_engagement(self):
+        """POST /api/engagement — create a new engagement."""
+        body = self.read_body_json()
+        if not body:
+            return
+        name = body.get("name", "").strip()
+        if not name:
+            self.send_json({"error": "name required"}, 400)
+            return
+        scope_json = json.dumps(body.get("scope", {}))
+        try:
+            with _db_lock:
+                cursor = self.db.execute(
+                    "INSERT INTO engagements (name, scope_json) VALUES (?,?)",
+                    (name, scope_json)
+                )
+                self.db.commit()
+                eng_id = cursor.lastrowid
+            self.send_json({"ok": True, "id": eng_id, "name": name})
+        except sqlite3.IntegrityError:
+            self.send_json({"error": f"engagement '{name}' already exists"}, 409)
+
+    def handle_list_engagements(self):
+        """GET /api/engagements — list all engagements."""
+        global active_engagement_id
+        with _db_lock:
+            rows = self.db.execute(
+                "SELECT id, name, scope_json, created_at FROM engagements ORDER BY id DESC"
+            ).fetchall()
+        self.send_json({
+            "engagements": [dict(r) for r in rows],
+            "active_id": active_engagement_id,
+        })
+
+    def handle_activate_engagement(self):
+        """POST /api/engagement/activate — activate an engagement."""
+        global active_engagement_id
+        body = self.read_body_json()
+        if not body:
+            return
+        eng_id = body.get("id")
+        if eng_id is None:
+            # Deactivate
+            active_engagement_id = None
+            self.send_json({"ok": True, "active_id": None})
+            return
+        with _db_lock:
+            row = self.db.execute(
+                "SELECT id, name, scope_json FROM engagements WHERE id=?", (eng_id,)
+            ).fetchone()
+        if not row:
+            self.send_json({"error": "engagement not found"}, 404)
+            return
+        active_engagement_id = eng_id
+        # Optionally load engagement scope into config
+        try:
+            scope_data = json.loads(row["scope_json"])
+            if scope_data:
+                self.cfg.scope.update(scope_data)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        self.send_json({"ok": True, "active_id": eng_id, "name": row["name"]})
+
+    def handle_clear_engagement(self):
+        """POST /api/engagement/clear — clear data for engagement or all."""
+        global active_engagement_id
+        body = self.read_body_json()
+        if not body:
+            body = {}
+        eng_id = body.get("engagement_id", active_engagement_id)
+
+        with _db_lock:
+            if eng_id:
+                # Delete scans and related data for this engagement
+                scan_ids = [r["id"] for r in self.db.execute(
+                    "SELECT id FROM scans WHERE engagement_id=?", (eng_id,)
+                ).fetchall()]
+                if scan_ids:
+                    placeholders = ",".join("?" * len(scan_ids))
+                    self.db.execute(f"DELETE FROM findings WHERE scan_id IN ({placeholders})", scan_ids)
+                    self.db.execute(f"DELETE FROM params WHERE scan_id IN ({placeholders})", scan_ids)
+                    self.db.execute(f"DELETE FROM urls WHERE scan_id IN ({placeholders})", scan_ids)
+                    self.db.execute(f"DELETE FROM subdomains WHERE scan_id IN ({placeholders})", scan_ids)
+                    self.db.execute(f"DELETE FROM hosts WHERE scan_id IN ({placeholders})", scan_ids)
+                    self.db.execute(f"DELETE FROM scans WHERE engagement_id=?", (eng_id,))
+            else:
+                # Clear all data tables
+                for table in ("findings", "params", "urls", "subdomains", "hosts", "scans"):
+                    self.db.execute(f"DELETE FROM {table}")
+            self.db.commit()
+        self.send_json({"ok": True, "cleared": "engagement" if eng_id else "all"})
+
+    # Feature 8: Bulk URL import
+    def handle_import_urls(self):
+        """POST /api/import/urls — bulk import URLs."""
+        body = self.read_body_json()
+        if not body:
+            return
+        urls = body.get("urls", [])
+        raw = body.get("raw", "")
+        if raw:
+            urls = [line.strip() for line in raw.split("\n") if line.strip()]
+
+        imported = 0
+        skipped = 0
+        for url in urls:
+            if not url.startswith("http://") and not url.startswith("https://"):
+                skipped += 1
+                continue
+            upsert_url(self.db, url, source="import")
+            imported += 1
+
+        self.send_json({"ok": True, "imported": imported, "skipped": skipped})
+
+    # Feature 9: Snapshots & diffing
+    def handle_create_snapshot(self):
+        """POST /api/snapshot — save current state as a snapshot."""
+        body = self.read_body_json()
+        if not body:
+            body = {}
+        name = body.get("name", f"snapshot-{time.strftime('%Y%m%d-%H%M%S')}")
+
+        with _db_lock:
+            subdomains = [r["fqdn"] for r in self.db.execute("SELECT fqdn FROM subdomains").fetchall()]
+            urls = [r["url"] for r in self.db.execute("SELECT url FROM urls").fetchall()]
+            findings = [
+                {"url": r["url"], "template_id": r["template_id"], "severity": r["severity"]}
+                for r in self.db.execute("SELECT url, template_id, severity FROM findings").fetchall()
+            ]
+            hosts = [
+                f"{r['ip']}:{r['port']}" for r in self.db.execute("SELECT ip, port FROM hosts").fetchall()
+            ]
+
+        data = {
+            "subdomains": subdomains,
+            "urls": urls,
+            "findings": findings,
+            "hosts": hosts,
+        }
+
+        with _db_lock:
+            cursor = self.db.execute(
+                "INSERT INTO snapshots (name, data_json) VALUES (?,?)",
+                (name, json.dumps(data))
+            )
+            self.db.commit()
+            snap_id = cursor.lastrowid
+
+        self.send_json({"ok": True, "id": snap_id, "name": name})
+
+    def handle_list_snapshots(self):
+        """GET /api/snapshots — list all snapshots."""
+        with _db_lock:
+            rows = self.db.execute(
+                "SELECT id, name, created_at FROM snapshots ORDER BY id DESC"
+            ).fetchall()
+        self.send_json({"snapshots": [dict(r) for r in rows]})
+
+    def handle_diff(self):
+        """GET /api/diff?a=<id>&b=<id> — compare two snapshots (b defaults to current state)."""
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        a_id = qs.get("a", [None])[0]
+        b_id = qs.get("b", [None])[0]
+
+        if not a_id:
+            self.send_json({"error": "parameter 'a' (snapshot id) required"}, 400)
+            return
+
+        # Load snapshot A
+        with _db_lock:
+            row_a = self.db.execute("SELECT data_json FROM snapshots WHERE id=?", (a_id,)).fetchone()
+        if not row_a:
+            self.send_json({"error": f"snapshot {a_id} not found"}, 404)
+            return
+        data_a = json.loads(row_a["data_json"])
+
+        # Load snapshot B or current state
+        if b_id:
+            with _db_lock:
+                row_b = self.db.execute("SELECT data_json FROM snapshots WHERE id=?", (b_id,)).fetchone()
+            if not row_b:
+                self.send_json({"error": f"snapshot {b_id} not found"}, 404)
+                return
+            data_b = json.loads(row_b["data_json"])
+        else:
+            # Current state
+            with _db_lock:
+                data_b = {
+                    "subdomains": [r["fqdn"] for r in self.db.execute("SELECT fqdn FROM subdomains").fetchall()],
+                    "urls": [r["url"] for r in self.db.execute("SELECT url FROM urls").fetchall()],
+                    "findings": [
+                        {"url": r["url"], "template_id": r["template_id"], "severity": r["severity"]}
+                        for r in self.db.execute("SELECT url, template_id, severity FROM findings").fetchall()
+                    ],
+                    "hosts": [
+                        f"{r['ip']}:{r['port']}" for r in self.db.execute("SELECT ip, port FROM hosts").fetchall()
+                    ],
+                }
+
+        # Compute diffs
+        subs_a = set(data_a.get("subdomains", []))
+        subs_b = set(data_b.get("subdomains", []))
+        urls_a = set(data_a.get("urls", []))
+        urls_b = set(data_b.get("urls", []))
+        hosts_a = set(data_a.get("hosts", []))
+        hosts_b = set(data_b.get("hosts", []))
+
+        # Findings diff by (url, template_id) tuple
+        findings_a = set(
+            (f["url"], f["template_id"]) for f in data_a.get("findings", [])
+        )
+        findings_b = set(
+            (f["url"], f["template_id"]) for f in data_b.get("findings", [])
+        )
+
+        diff = {
+            "subdomains": {"added": sorted(subs_b - subs_a), "removed": sorted(subs_a - subs_b)},
+            "urls": {"added": sorted(urls_b - urls_a), "removed": sorted(urls_a - urls_b)},
+            "hosts": {"added": sorted(hosts_b - hosts_a), "removed": sorted(hosts_a - hosts_b)},
+            "findings": {
+                "added": [{"url": u, "template_id": t} for u, t in sorted(findings_b - findings_a)],
+                "removed": [{"url": u, "template_id": t} for u, t in sorted(findings_a - findings_b)],
+            },
+        }
+        self.send_json({"diff": diff, "a": int(a_id), "b": int(b_id) if b_id else "current"})
 
     def handle_sse(self):
         """GET /api/events — Server-Sent Events stream."""

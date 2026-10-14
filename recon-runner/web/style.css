@@ -13,6 +13,25 @@
     --font-mono: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
 }
 
+/* Feature 2: Light theme */
+[data-theme="light"] {
+    --bg: #ffffff;
+    --surface: #f6f8fa;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --text-muted: #656d76;
+    --accent: #0969da;
+    --green: #1a7f37;
+    --red: #cf222e;
+    --orange: #9a6700;
+}
+[data-theme="light"] #output-pane {
+    background: #f6f8fa;
+}
+[data-theme="light"] .evidence-pre {
+    background: #ffffff;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -32,13 +51,64 @@ header {
 }
 
 header h1 { font-size: 1.1rem; color: var(--accent); }
-#status-bar { display: flex; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
+#status-bar { display: flex; gap: 16px; font-size: 0.8rem; color: var(--text-muted); align-items: center; }
+
+/* Feature 1: Stats display */
+#stats-display { display: flex; gap: 10px; }
+.stat-item { font-size: 0.75rem; color: var(--text-muted); }
+.stat-item b { color: var(--accent); }
+
+/* Feature 2: Theme toggle button */
+#btn-theme-toggle {
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+#btn-theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Feature 6: Engagement bar */
+#engagement-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+#engagement-select {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    min-width: 150px;
+}
+#engagement-bar button {
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+}
+#engagement-bar button:hover { color: var(--accent); border-color: var(--accent); }
 
 main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
 
 /* Target input */
 #target-section { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-#target-input-group { display: flex; gap: 8px; flex: 1; min-width: 400px; }
+#target-input-group { display: flex; gap: 8px; flex: 1; min-width: 400px; flex-wrap: wrap; }
 #target-input-group select,
 #target-input-group input,
 #target-input-group button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-family: var(--font-mono); font-size: 0.85rem; }
@@ -51,6 +121,71 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
 #parsed-count { color: var(--green); font-size: 0.75rem; }
 #throttle-control { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; }
 #throttle-control select { padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-family: var(--font-mono); }
+
+/* Feature 5: Nuclei filters */
+#nuclei-filters {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    font-size: 0.8rem;
+    flex-wrap: wrap;
+    width: 100%;
+}
+.nuclei-filter-label {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+}
+.nuclei-filter-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.nuclei-filter-group label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 0.8rem;
+}
+.nuclei-tags-input {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    width: 200px;
+}
+
+/* Feature 8: Import URLs button */
+#btn-import-urls {
+    padding: 8px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+}
+#btn-import-urls:hover { background: rgba(88,166,255,0.1); }
+#btn-submit-import {
+    padding: 8px 16px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--accent);
+    color: var(--bg);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-weight: bold;
+}
 
 /* Tools */
 #tools-panel { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -168,6 +303,19 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
 }
 #btn-recalculate-roi:hover { color: var(--accent); border-color: var(--accent); }
 
+/* Feature 4: Auto-promote button */
+#btn-auto-promote {
+    padding: 4px 12px;
+    border: 1px solid var(--green);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--green);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+#btn-auto-promote:hover { background: rgba(63,185,80,0.15); }
+
 /* ROI badges and stats */
 .roi-stats {
     display: flex;
@@ -192,6 +340,46 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
 .roi-low  { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid var(--green); }
 .roi-none { color: var(--text-muted); }
 .roi-breakdown { font-size: 0.7rem; color: var(--text-muted); max-width: 250px; }
+
+/* Feature 3: Triage & notes */
+.triage-select {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    cursor: pointer;
+}
+.note-input {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    width: 120px;
+}
+#triage-filter-bar, #triage-filter-findings-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+#triage-filter-bar select, #triage-filter-findings-bar select {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+}
+
 /* Findings header */
 #findings-header {
     display: flex;
@@ -217,6 +405,18 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
     align-items: center;
     margin-bottom: 12px;
     flex-wrap: wrap;
+}
+
+/* Feature 10: Dupe badge */
+.dupe-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(88,166,255,0.15);
+    color: var(--accent);
+    font-size: 0.7rem;
+    font-weight: bold;
+    border: 1px solid var(--accent);
 }
 
 /* Evidence viewer */
@@ -281,7 +481,8 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 24px;
-    max-width: 450px;
+    max-width: 500px;
+    width: 90%;
 }
 .modal-content h3 { margin-bottom: 12px; color: var(--red); }
 .modal-content p { margin-bottom: 8px; font-size: 0.85rem; }
@@ -292,6 +493,17 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
     margin-right: 8px;
     cursor: pointer;
     font-family: var(--font-mono);
+}
+.modal-content textarea {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    resize: vertical;
 }
 #btn-confirm-attack { background: var(--red); color: white; border-color: var(--red); }
 #btn-cancel-attack { background: transparent; color: var(--text-muted); }
@@ -436,5 +648,86 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
     font-size: 0.85rem;
     max-width: 350px;
 }
+
+/* Feature 9: Diff section */
+#diff-section {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px;
+    background: var(--surface);
+}
+#diff-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+#diff-header h2 {
+    font-size: 0.95rem;
+    color: var(--accent);
+}
+.diff-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.diff-controls select {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    max-width: 250px;
+}
+.diff-controls span {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+.diff-controls button {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+.diff-controls button:hover { color: var(--accent); border-color: var(--accent); }
+#btn-save-snapshot {
+    border-color: var(--green) !important;
+    color: var(--green) !important;
+}
+#btn-save-snapshot:hover { background: rgba(63,185,80,0.15); }
+
+.diff-category {
+    margin-bottom: 16px;
+}
+.diff-category h3 {
+    font-size: 0.85rem;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+.diff-list {
+    list-style: none;
+    padding: 4px 12px;
+    font-size: 0.75rem;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    margin-bottom: 4px;
+}
+.diff-list li {
+    padding: 2px 0;
+}
+.diff-added li { color: var(--green); }
+.diff-removed li { color: var(--red); }
 
 .hidden { display: none !important; }

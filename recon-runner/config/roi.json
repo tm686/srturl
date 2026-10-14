@@ -29,5 +29,6 @@
     "session cookies",
     "CORS headers",
     "API endpoints"
-  ]
+  ],
+  "auto_promote_threshold": 80
 }

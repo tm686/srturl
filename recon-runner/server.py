@@ -613,6 +613,62 @@ def parse_nuclei_file(filepath, db, scan_id):
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
+
+# CeWL wordlist file — shared path for the CeWL → dnsx-brute chain
+_CEWL_WORDLIST_PATH = None
+
+
+def parse_cewl_file(filepath, db, scan_id):
+    """Post-process CeWL output into a cleaned DNS brute-force wordlist.
+
+    Mirrors ars0n-framework logic:
+    - Read raw words from CeWL -w output (one word per line)
+    - Lowercase, strip, keep only alphanumeric chars
+    - Filter: length 3-20, no whitespace, no URLs
+    - Deduplicate and sort
+    - Write cleaned wordlist to data/cewl-wordlist.txt
+    """
+    global _CEWL_WORDLIST_PATH
+    import re
+    try:
+        with open(filepath) as f:
+            raw_words = f.readlines()
+    except FileNotFoundError:
+        return
+
+    seen = set()
+    cleaned = []
+    for word in raw_words:
+        # CeWL with -c outputs "word, count" — strip the count portion
+        word = word.split(",")[0].strip().lower()
+        # Keep only alphanumeric characters
+        word = re.sub(r'[^a-z0-9]', '', word)
+        # Filter: 3-20 chars, no empty, no duplicates
+        if not word or len(word) < 3 or len(word) > 20:
+            continue
+        if word in seen:
+            continue
+        # Skip common noise words
+        if word in ("www", "http", "https", "html", "com", "org", "net"):
+            continue
+        seen.add(word)
+        cleaned.append(word)
+
+    cleaned.sort()
+
+    if not cleaned:
+        return
+
+    # Write cleaned wordlist
+    wl_path = str(SCRIPT_DIR / "data" / "cewl-wordlist.txt")
+    with open(wl_path, "w") as f:
+        f.write("\n".join(cleaned) + "\n")
+    _CEWL_WORDLIST_PATH = wl_path
+    event_bus.publish("pipeline_info", {
+        "message": f"CeWL wordlist: {len(cleaned)} words -> {wl_path}",
+    })
+
+
 PARSERS = {
     "subfinder": parse_subfinder,
     "dnsx": parse_dnsx,
@@ -630,6 +686,7 @@ FILE_PARSERS = {
     "ffuf": parse_ffuf_file,
     "arjun": parse_arjun_file,
     "nuclei": parse_nuclei_file,
+    "cewl": parse_cewl_file,
 }
 
 
@@ -998,6 +1055,20 @@ def consolidate_discovered_urls(db, scan_id=None):
     return tmp.name, len(urls)
 
 
+def consolidate_cewl_wordlist(db, scan_id=None):
+    """Return the CeWL-generated wordlist for DNS brute-forcing.
+
+    This is the link between the CeWL step and the subsequent dnsx-brute step
+    in the wildcard pipeline, mirroring ars0n-framework's chained workflow.
+    """
+    global _CEWL_WORDLIST_PATH
+    if _CEWL_WORDLIST_PATH and Path(_CEWL_WORDLIST_PATH).is_file():
+        with open(_CEWL_WORDLIST_PATH) as f:
+            count = sum(1 for line in f if line.strip())
+        return _CEWL_WORDLIST_PATH, count
+    return None, 0
+
+
 def consolidate_hosts_for_httpx(db, scan_id=None):
     """Format ip:port lines from hosts table for httpx probing (Feature 7)."""
     with _db_lock:
@@ -1151,7 +1222,7 @@ class PipelineRunner:
 # ROI scoring engine
 # ---------------------------------------------------------------------------
 
-def compute_roi_scores(db, cfg):
+def compute_roi_scores(db, cfg, scan_id=None):
     """Compute ROI score for every URL in the database.
 
     Scoring signals (from config/roi.json):
@@ -1162,6 +1233,7 @@ def compute_roi_scores(db, cfg):
     - Interesting status codes (401/403 suggest auth surface)
     - Application complexity (title/server signals)
     Returns list of (url, score, breakdown) tuples.
+    Optionally filtered by scan_id.
     """
     roi_cfg = cfg.roi
     weights = roi_cfg.get("weights", {})
@@ -1169,10 +1241,16 @@ def compute_roi_scores(db, cfg):
     security_headers = roi_cfg.get("security_headers", [])
 
     with _db_lock:
-        rows = db.execute(
+        query = (
             "SELECT url, status_code, title, tech, server, tls_state, "
-            "missing_headers, endpoint_count, promoted_to_target, notes, triage FROM urls"
-        ).fetchall()
+            "missing_headers, endpoint_count, promoted_to_target, notes, triage, "
+            "screenshot_path FROM urls"
+        )
+        if scan_id:
+            query += " WHERE scan_id=?"
+            rows = db.execute(query, (scan_id,)).fetchall()
+        else:
+            rows = db.execute(query).fetchall()
 
     results = []
     for row in rows:
@@ -1262,6 +1340,8 @@ def compute_roi_scores(db, cfg):
             "title": row["title"] or "",
             "tech": tech,
             "server": row["server"] or "",
+            "tls_state": row["tls_state"] or "",
+            "screenshot_path": row["screenshot_path"] or "",
             "promoted_to_target": bool(row["promoted_to_target"]),
             "notes": row["notes"] or "",
             "triage": row["triage"] or "",
@@ -1343,7 +1423,19 @@ def build_r3_steps(scan_id):
 
 
 def build_wildcard_steps(scan_id):
-    """Full wildcard pipeline: R1 (passive) + R2 (brute) + R3 (crawl) + screenshots"""
+    """Full wildcard pipeline: R1 (passive) + R2 (brute) + CeWL enrichment + R3 (crawl) + screenshots.
+
+    Flow mirrors ars0n-framework-v2:
+    1. Passive subdomain enum (subfinder)
+    2. DNS resolution (dnsx)
+    3. Generic DNS brute force (dnsx-brute with standard wordlist)
+    4. HTTP probe all hosts (httpx)
+    5. CeWL spiders live URLs → generates target-specific wordlist
+    6. DNS brute force with CeWL wordlist → discovers subdomains generic lists miss
+    7. Re-probe newly discovered hosts (httpx)
+    8. Screenshots
+    9. Crawl (katana)
+    """
     return [
         # R1: Passive enumeration
         {
@@ -1358,19 +1450,41 @@ def build_wildcard_steps(scan_id):
             "label": "R1: DNS resolution",
             "required": True,
         },
-        # R2: DNS brute force
+        # R2: DNS brute force (generic wordlist)
         {
             "tool": "dnsx-brute",
-            "label": "R2: DNS brute force",
+            "label": "R2: DNS brute force (generic wordlist)",
             "required": False,
         },
-        # Combined HTTP probe (covers R1 + R2 results in one pass)
+        # HTTP probe (covers R1 + R2 results)
         {
             "tool": "httpx",
             "consolidate": consolidate_all_hosts,
             "context_key": "in_file",
             "label": "HTTP probe (all hosts)",
             "required": True,
+        },
+        # CeWL: Spider live URLs to generate target-specific wordlist
+        {
+            "tool": "cewl",
+            "label": "CeWL: Custom wordlist from live content",
+            "required": False,
+        },
+        # DNS brute force with CeWL-generated wordlist
+        {
+            "tool": "dnsx-brute",
+            "consolidate": consolidate_cewl_wordlist,
+            "context_key": "dns_wordlist",
+            "label": "DNS brute force (CeWL wordlist)",
+            "required": False,
+        },
+        # Re-probe any newly discovered hosts from CeWL brute
+        {
+            "tool": "httpx",
+            "consolidate": consolidate_unprobed_hosts,
+            "context_key": "in_file",
+            "label": "HTTP probe (new CeWL hosts)",
+            "required": False,
         },
         # Screenshots of live URLs
         {
@@ -1837,28 +1951,45 @@ class ReconHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "message": "stop signal sent"})
 
     def handle_subdomains(self):
-        """GET /api/subdomains — return all subdomains."""
+        """GET /api/subdomains — return all subdomains (optionally filtered by scan_id)."""
+        scan_id = parse_qs(urlparse(self.path).query).get("scan_id", [None])[0]
         with _db_lock:
-            rows = self.db.execute(
-                "SELECT fqdn, resolved_ip, sources, scan_id, created_at "
-                "FROM subdomains ORDER BY fqdn"
-            ).fetchall()
+            if scan_id:
+                rows = self.db.execute(
+                    "SELECT fqdn, resolved_ip, sources, scan_id, created_at "
+                    "FROM subdomains WHERE scan_id=? ORDER BY fqdn", (scan_id,)
+                ).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT fqdn, resolved_ip, sources, scan_id, created_at "
+                    "FROM subdomains ORDER BY fqdn"
+                ).fetchall()
         self.send_json({"subdomains": [dict(r) for r in rows], "count": len(rows)})
 
     def handle_urls(self):
-        """GET /api/urls — return all discovered URLs with metadata."""
+        """GET /api/urls — return all discovered URLs with metadata (optionally filtered by scan_id)."""
+        scan_id = parse_qs(urlparse(self.path).query).get("scan_id", [None])[0]
         with _db_lock:
-            rows = self.db.execute(
-                "SELECT url, status_code, title, tech, server, tls_state, "
-                "missing_headers, endpoint_count, screenshot_path, roi_score, "
-                "promoted_to_target, sources, scan_id, created_at, notes, triage "
-                "FROM urls ORDER BY roi_score DESC, url"
-            ).fetchall()
+            if scan_id:
+                rows = self.db.execute(
+                    "SELECT url, status_code, title, tech, server, tls_state, "
+                    "missing_headers, endpoint_count, screenshot_path, roi_score, "
+                    "promoted_to_target, sources, scan_id, created_at, notes, triage "
+                    "FROM urls WHERE scan_id=? ORDER BY roi_score DESC, url", (scan_id,)
+                ).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT url, status_code, title, tech, server, tls_state, "
+                    "missing_headers, endpoint_count, screenshot_path, roi_score, "
+                    "promoted_to_target, sources, scan_id, created_at, notes, triage "
+                    "FROM urls ORDER BY roi_score DESC, url"
+                ).fetchall()
         self.send_json({"urls": [dict(r) for r in rows], "count": len(rows)})
 
     def handle_roi(self):
-        """GET /api/roi — return ROI-ranked URLs with score breakdowns."""
-        results = compute_roi_scores(self.db, self.cfg)
+        """GET /api/roi — return ROI-ranked URLs with score breakdowns (optionally filtered by scan_id)."""
+        scan_id = parse_qs(urlparse(self.path).query).get("scan_id", [None])[0]
+        results = compute_roi_scores(self.db, self.cfg, scan_id=scan_id)
         self.send_json({"roi": results, "count": len(results)})
 
     def handle_roi_recalculate(self):
@@ -2008,17 +2139,25 @@ class ReconHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "promoted": count, "threshold": threshold})
 
     def handle_findings(self):
-        """GET /api/findings — return all vulnerability findings with dedup (Feature 10)."""
+        """GET /api/findings — return all vulnerability findings with dedup (Feature 10).
+        Optionally filtered by scan_id query param."""
+        scan_id = parse_qs(urlparse(self.path).query).get("scan_id", [None])[0]
         with _db_lock:
-            rows = self.db.execute(
+            query = (
                 "SELECT id, url, vector, template_id, severity, tool, "
                 "request, response, sources, scan_id, created_at, notes, triage "
-                "FROM findings ORDER BY "
+                "FROM findings "
+            )
+            if scan_id:
+                query += "WHERE scan_id=? "
+            query += (
+                "ORDER BY "
                 "CASE severity "
                 "  WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
                 "  WHEN 'medium' THEN 2 WHEN 'low' THEN 3 "
                 "  WHEN 'info' THEN 4 ELSE 5 END, created_at DESC"
-            ).fetchall()
+            )
+            rows = self.db.execute(query, (scan_id,) if scan_id else ()).fetchall()
 
         # Feature 10: Dedup by (url, template_id) — keep first occurrence, add dupe_count
         seen = {}

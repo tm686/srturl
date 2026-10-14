@@ -30,6 +30,16 @@
       "enabled": true,
       "optional": true
     },
+    "cewl": {
+      "binary": "cewl",
+      "phase": "enum",
+      "target_types": ["wildcard"],
+      "template": "cewl https://{host} -d 2 -m 5 --with-numbers -w {out_file}",
+      "output": "file_lines",
+      "dedupe_key": "",
+      "enabled": true,
+      "optional": true
+    },
     "httpx": {
       "binary": "httpx-toolkit",
       "binary_aliases": ["httpx-toolkit", "httpx"],

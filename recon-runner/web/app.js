@@ -22,6 +22,9 @@ const state = {
     activeEngagement: null,
     triageFilterROI: "",
     triageFilterFindings: "",
+    roiModalPage: 0,
+    roiModalData: [],
+    selectedScanId: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +89,7 @@ async function init() {
     loadPromoted();
     loadROI();
     loadSnapshots();
+    loadScanHistory();
     connectSSE();
 }
 
@@ -211,11 +215,13 @@ function connectSSE() {
         updateRunningUI();
         appendOutput(`\n=== Pipeline complete (${d.steps} steps) ===`, "output-pipeline");
         // Refresh data tables + ROI + findings + stats
-        loadSubdomains();
-        loadUrls();
-        loadROI();
-        loadFindings();
+        const sid = state.selectedScanId;
+        loadSubdomains(sid);
+        loadUrls(sid);
+        loadROI(sid);
+        loadFindings(sid);
         loadStats();
+        loadScanHistory();
     });
 
     evtSource.addEventListener("error", (e) => {
@@ -642,6 +648,20 @@ function bindEvents() {
     const btnRunDiff = $("#btn-run-diff");
     if (btnRunDiff) btnRunDiff.addEventListener("click", runDiff);
 
+    // ROI Report modal
+    const btnOpenModal = $("#btn-open-roi-modal");
+    if (btnOpenModal) btnOpenModal.addEventListener("click", openROIModal);
+    const btnCloseModal = $("#btn-close-roi-modal");
+    if (btnCloseModal) btnCloseModal.addEventListener("click", closeROIModal);
+    const btnRoiPrev = $("#btn-roi-prev");
+    if (btnRoiPrev) btnRoiPrev.addEventListener("click", roiModalPrev);
+    const btnRoiNext = $("#btn-roi-next");
+    if (btnRoiNext) btnRoiNext.addEventListener("click", roiModalNext);
+
+    // Scan history filter
+    const scanHistorySelect = $("#scan-history-select");
+    if (scanHistorySelect) scanHistorySelect.addEventListener("change", onScanFilterChange);
+
     // Feature 3: Triage filters
     const triageFilterROI = $("#triage-filter-roi");
     if (triageFilterROI) triageFilterROI.addEventListener("change", () => {
@@ -786,9 +806,11 @@ function cancelAttack() {
 // Findings (Feature 10: dedup)
 // ---------------------------------------------------------------------------
 
-async function loadFindings() {
+async function loadFindings(scanId) {
     try {
-        const data = await api("/api/findings");
+        let url = "/api/findings";
+        if (scanId) url += `?scan_id=${scanId}`;
+        const data = await api(url);
         renderFindings(data.findings || [], data.total_count || 0);
     } catch { /* ignore */ }
 }
@@ -922,9 +944,11 @@ function exportFindings(format) {
 // Data tables — subdomains + URLs (loaded after pipeline / on demand)
 // ---------------------------------------------------------------------------
 
-async function loadSubdomains() {
+async function loadSubdomains(scanId) {
     try {
-        const data = await api("/api/subdomains");
+        let url = "/api/subdomains";
+        if (scanId) url += `?scan_id=${scanId}`;
+        const data = await api(url);
         renderSubdomainsTable(data.subdomains || []);
     } catch { /* ignore */ }
 }
@@ -947,9 +971,11 @@ function renderSubdomainsTable(subs) {
     container.innerHTML = html;
 }
 
-async function loadUrls() {
+async function loadUrls(scanId) {
     try {
-        const data = await api("/api/urls");
+        let url = "/api/urls";
+        if (scanId) url += `?scan_id=${scanId}`;
+        const data = await api(url);
         renderUrlsTable(data.urls || []);
     } catch { /* ignore */ }
 }
@@ -1000,7 +1026,7 @@ function showScreenshot(src, url) {
         <div class="screenshot-overlay-content">
             <div class="screenshot-overlay-header">
                 <span class="url-cell">${esc(url)}</span>
-                <button onclick="this.closest('.screenshot-overlay').remove()">Close</button>
+                <button class="screenshot-close-btn" onclick="this.closest('.screenshot-overlay').remove()" title="Close">&times;</button>
             </div>
             <img src="${src}" alt="Screenshot of ${esc(url)}">
         </div>
@@ -1008,6 +1034,11 @@ function showScreenshot(src, url) {
     overlay.addEventListener("click", (e) => {
         if (e.target === overlay) overlay.remove();
     });
+    // Escape key to close
+    const escHandler = (e) => {
+        if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", escHandler); }
+    };
+    document.addEventListener("keydown", escHandler);
     document.body.appendChild(overlay);
 }
 
@@ -1021,9 +1052,11 @@ function esc(s) {
 // ROI Report (with Feature 3: notes/triage columns)
 // ---------------------------------------------------------------------------
 
-async function loadROI() {
+async function loadROI(scanId) {
     try {
-        const data = await api("/api/roi");
+        let url = "/api/roi";
+        if (scanId) url += `?scan_id=${scanId}`;
+        const data = await api(url);
         renderROI(data.roi || []);
     } catch { /* ignore */ }
 }
@@ -1368,6 +1401,207 @@ function renderDiff(diff) {
         html = '<span class="output-stderr">No differences found</span>';
     }
     container.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// ROI Report Modal
+// ---------------------------------------------------------------------------
+
+function roiModalKeyHandler(e) {
+    if (e.key === "ArrowRight") { roiModalNext(); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { roiModalPrev(); e.preventDefault(); }
+    else if (e.key === "Escape") { closeROIModal(); e.preventDefault(); }
+}
+
+async function openROIModal() {
+    try {
+        const scanId = state.selectedScanId;
+        let url = "/api/roi";
+        if (scanId) url += `?scan_id=${scanId}`;
+        const data = await api(url);
+        const results = data.roi || [];
+        if (results.length === 0) {
+            appendOutput("[!] No ROI data to display — run a pipeline first", "output-warn");
+            return;
+        }
+        state.roiModalData = results;
+        state.roiModalPage = 0;
+        renderROIDistribution(results);
+        renderROIPage(0);
+        $("#roi-modal").classList.remove("hidden");
+        document.addEventListener("keydown", roiModalKeyHandler);
+    } catch (err) {
+        appendOutput(`[!] Failed to open ROI report: ${err.message}`, "output-error");
+    }
+}
+
+function closeROIModal() {
+    $("#roi-modal").classList.add("hidden");
+    document.removeEventListener("keydown", roiModalKeyHandler);
+}
+
+function roiModalNext() {
+    if (state.roiModalPage < state.roiModalData.length - 1) {
+        state.roiModalPage++;
+        renderROIPage(state.roiModalPage);
+    }
+}
+
+function roiModalPrev() {
+    if (state.roiModalPage > 0) {
+        state.roiModalPage--;
+        renderROIPage(state.roiModalPage);
+    }
+}
+
+function renderROIDistribution(data) {
+    const dist = $("#roi-modal-distribution");
+    if (!dist) return;
+    const high = data.filter(r => r.score >= 80).length;
+    const med = data.filter(r => r.score >= 40 && r.score < 80).length;
+    const low = data.filter(r => r.score > 0 && r.score < 40).length;
+    dist.innerHTML =
+        `<span class="roi-dist-badge"><span class="roi-badge roi-high">${high}</span> HIGH</span>` +
+        `<span class="roi-dist-badge"><span class="roi-badge roi-med">${med}</span> MED</span>` +
+        `<span class="roi-dist-badge"><span class="roi-badge roi-low">${low}</span> LOW</span>`;
+}
+
+function renderROIPage(page) {
+    const data = state.roiModalData;
+    const r = data[page];
+    if (!r) return;
+    const total = data.length;
+
+    // Update page counters
+    const pageInfo = $("#roi-modal-page-info");
+    if (pageInfo) pageInfo.textContent = `${page + 1} / ${total}`;
+    const footerInfo = $("#roi-modal-footer-info");
+    if (footerInfo) footerInfo.textContent = `Target ${page + 1} of ${total}`;
+
+    // Enable/disable nav buttons
+    const prevBtn = $("#btn-roi-prev");
+    const nextBtn = $("#btn-roi-next");
+    if (prevBtn) prevBtn.disabled = page === 0;
+    if (nextBtn) nextBtn.disabled = page >= total - 1;
+
+    const tier = roiTier(r.score);
+
+    // Breakdown list
+    const breakdownItems = Object.entries(r.breakdown || {})
+        .map(([k, v]) => `<li>${esc(k)}: <span>+${v}</span></li>`)
+        .join("") || "<li>No scoring signals</li>";
+
+    // Left column
+    let leftHtml = `<div class="roi-page-info">`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-url">${esc(r.url)}</span></div>`;
+    leftHtml += `<div class="roi-page-score">`;
+    leftHtml += `<span class="roi-badge ${tier.cls}">${r.score}</span>`;
+    leftHtml += `<span style="color:var(--text-muted)">${tier.label} ROI</span>`;
+    leftHtml += `</div>`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-field-label">Status Code</span><span class="roi-page-field-value">${r.status_code || "\u2014"}</span></div>`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-field-label">Title</span><span class="roi-page-field-value">${esc(r.title || "\u2014")}</span></div>`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-field-label">Tech Stack</span><span class="roi-page-field-value">${esc(r.tech || "\u2014")}</span></div>`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-field-label">Server</span><span class="roi-page-field-value">${esc(r.server || "\u2014")}</span></div>`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-field-label">TLS</span><span class="roi-page-field-value">${esc(r.tls_state || "\u2014")}</span></div>`;
+    leftHtml += `<div class="roi-page-field"><span class="roi-page-field-label">Breakdown</span><ul class="roi-page-breakdown">${breakdownItems}</ul></div>`;
+
+    // Triage / notes / promote controls
+    leftHtml += `<div class="roi-page-controls">`;
+    leftHtml += `<select class="triage-select" onchange="window.saveNote('urls','${esc(r.url)}','triage',this.value)">`;
+    for (const [val, label] of [["","\u2014"],["interesting","Interesting"],["investigated","Investigated"],["false_positive","False Positive"]]) {
+        leftHtml += `<option value="${val}"${r.triage === val ? " selected" : ""}>${label}</option>`;
+    }
+    leftHtml += `</select>`;
+    leftHtml += `<input class="note-input" value="${esc(r.notes || "")}" onchange="window.saveNote('urls','${esc(r.url)}','notes',this.value)" placeholder="notes" style="width:200px">`;
+    if (r.promoted_to_target) {
+        leftHtml += `<span class="promoted-badge">Promoted</span>`;
+        leftHtml += `<button class="btn-promote" onclick="window.demoteFromModal('${esc(r.url)}')">Demote</button>`;
+    } else {
+        leftHtml += `<button class="btn-promote" onclick="window.promoteFromModal('${esc(r.url)}')">Promote</button>`;
+    }
+    leftHtml += `</div>`;
+    leftHtml += `</div>`;
+
+    // Right column — screenshot
+    let rightHtml = `<div class="roi-page-screenshot">`;
+    if (r.screenshot_path) {
+        rightHtml += `<img id="roi-modal-screenshot" src="/screenshots/${esc(r.screenshot_path)}" alt="Screenshot" title="Double-click to expand" loading="lazy">`;
+    } else {
+        rightHtml += `<div class="roi-page-screenshot-placeholder">No screenshot available</div>`;
+    }
+    rightHtml += `</div>`;
+
+    const body = $("#roi-modal-body");
+    if (body) {
+        body.innerHTML = leftHtml + rightHtml;
+        // Bind double-click on screenshot after DOM insertion
+        const ssImg = body.querySelector("#roi-modal-screenshot");
+        if (ssImg) {
+            ssImg.addEventListener("dblclick", () => showScreenshot(ssImg.src, r.url));
+        }
+    }
+}
+
+// Modal promote/demote helpers
+window.promoteFromModal = async function(url) {
+    await promoteUrl(url);
+    // Refresh modal data for current page
+    const r = state.roiModalData[state.roiModalPage];
+    if (r && r.url === url) {
+        r.promoted_to_target = true;
+        renderROIPage(state.roiModalPage);
+    }
+};
+
+window.demoteFromModal = async function(url) {
+    try {
+        const data = await apiPost("/api/demote", {url});
+        if (data.ok) {
+            appendOutput(`[*] Demoted ${url}`, "output-info");
+            loadROI(state.selectedScanId);
+            loadPromoted();
+            const r = state.roiModalData[state.roiModalPage];
+            if (r && r.url === url) {
+                r.promoted_to_target = false;
+                renderROIPage(state.roiModalPage);
+            }
+        }
+    } catch { /* ignore */ }
+};
+
+// ---------------------------------------------------------------------------
+// Per-Scan Filtering
+// ---------------------------------------------------------------------------
+
+async function loadScanHistory() {
+    const sel = $("#scan-history-select");
+    if (!sel) return;
+    try {
+        const data = await api("/api/scans");
+        const scans = data.scans || [];
+        sel.innerHTML = '<option value="">All scans</option>';
+        for (const s of scans) {
+            const opt = document.createElement("option");
+            opt.value = s.id;
+            const date = s.started_at ? s.started_at.slice(0, 16) : "";
+            opt.textContent = `#${s.id} ${s.target} (${s.target_type}) ${date}`;
+            sel.appendChild(opt);
+        }
+        // Show the bar if there are scans
+        const bar = $("#scan-filter-bar");
+        if (bar) bar.classList.toggle("hidden", scans.length === 0);
+    } catch { /* ignore */ }
+}
+
+function onScanFilterChange() {
+    const sel = $("#scan-history-select");
+    if (!sel) return;
+    const scanId = sel.value || null;
+    state.selectedScanId = scanId;
+    loadSubdomains(scanId);
+    loadUrls(scanId);
+    loadROI(scanId);
+    loadFindings(scanId);
 }
 
 // ---------------------------------------------------------------------------

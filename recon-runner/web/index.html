@@ -88,6 +88,14 @@
             <div id="tool-buttons"></div>
         </section>
 
+        <!-- Scan filter bar -->
+        <div id="scan-filter-bar" class="hidden">
+            <label>View scan:</label>
+            <select id="scan-history-select">
+                <option value="">All scans</option>
+            </select>
+        </div>
+
         <!-- Output pane (SSE live stream) -->
         <section id="output-section">
             <div id="output-header">
@@ -104,6 +112,7 @@
             <div id="roi-header">
                 <h2>ROI Report</h2>
                 <div style="display:flex;gap:8px;align-items:center">
+                    <button id="btn-open-roi-modal">Open Report</button>
                     <button id="btn-auto-promote">Auto-Promote</button>
                     <button id="btn-recalculate-roi">Recalculate</button>
                 </div>
@@ -185,6 +194,24 @@
             <div style="margin-top:12px">
                 <button id="btn-submit-import">Import</button>
                 <button id="btn-cancel-import">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ROI Report Modal -->
+    <div id="roi-modal" class="modal hidden">
+        <div class="roi-modal-content">
+            <div class="roi-modal-header">
+                <h2>ROI Report</h2>
+                <span id="roi-modal-page-info">1 / 1</span>
+                <div id="roi-modal-distribution"></div>
+                <button id="btn-close-roi-modal" title="Close">&times;</button>
+            </div>
+            <div id="roi-modal-body"></div>
+            <div class="roi-modal-footer">
+                <button id="btn-roi-prev">&larr; Previous</button>
+                <span id="roi-modal-footer-info"></span>
+                <button id="btn-roi-next">Next &rarr;</button>
             </div>
         </div>
     </div>

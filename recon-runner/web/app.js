@@ -18,6 +18,7 @@ const state = {
     parsedCount: 0,
     pipelineStep: 0,
     pipelineTotal: 0,
+    findings: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ async function init() {
     bindEvents();
     updateTargetTypeUI();
     loadPromoted();
+    loadROI();
     connectSSE();
 }
 
@@ -770,8 +772,12 @@ function renderUrlsTable(urls) {
     if (!container) return;
     if (urls.length === 0) return; // don't overwrite subdomains table if no URLs yet
 
+    // Remove any previously rendered URLs table to prevent duplicates
+    const existingUrlsTable = container.querySelector(".urls-table-block");
+    if (existingUrlsTable) existingUrlsTable.remove();
+
     const hasScreenshots = urls.some(u => u.screenshot_path);
-    let html = container.innerHTML || "";
+    let html = `<div class="urls-table-block">`;
     html += `<div class="data-table-header" style="margin-top:16px">${urls.length} live URLs</div>`;
     html += '<table class="data-table"><thead><tr>';
     if (hasScreenshots) html += '<th>Screenshot</th>';
@@ -792,10 +798,12 @@ function renderUrlsTable(urls) {
         html += `<td>${esc(u.server || "—")}</td>`;
         html += `</tr>`;
     }
-    html += '</tbody></table>';
-    container.innerHTML = html;
+    html += '</tbody></table></div>';
+    container.insertAdjacentHTML("beforeend", html);
 }
 
+// Exposed on window for inline onclick in rendered HTML
+window.showScreenshot = showScreenshot;
 function showScreenshot(src, url) {
     // Create fullscreen overlay for screenshot preview
     const overlay = document.createElement("div");

@@ -13,7 +13,11 @@ DAEMON=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --daemon|-d) DAEMON=true; shift ;;
-        --port|-p)   PORT="$2"; shift 2 ;;
+        --port|-p)
+            if [[ $# -lt 2 ]]; then
+                echo "[!] --port requires an argument"; exit 1
+            fi
+            PORT="$2"; shift 2 ;;
         *)           echo "Usage: bash run.sh [--daemon] [--port PORT]"; exit 1 ;;
     esac
 done

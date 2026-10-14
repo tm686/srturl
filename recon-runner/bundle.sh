@@ -58,6 +58,8 @@ gh_release_bin() {
             mv "$found" "$OUTDIR/bin/$binary"
         else
             echo "[!] No binary found after extracting $binary"
+            rm -rf "$extract_dir"
+            return 1
         fi
     fi
     chmod +x "$OUTDIR/bin/$binary" 2>/dev/null || true

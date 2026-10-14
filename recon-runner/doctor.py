@@ -83,12 +83,21 @@ def check_paths_json():
     results = [("config/paths.json", PASS, "loaded")]
     for key in ("bin_dir", "nuclei_templates", "wordlists_dir", "db_path"):
         val = data.get(key, "")
-        if val and key == "bin_dir":
-            p = Path(val)
-            if p.is_dir():
-                results.append((f"  paths.bin_dir", PASS, str(p)))
+        if not val:
+            continue
+        p = Path(val)
+        if key == "db_path":
+            # DB file may not exist yet; check parent dir is writable
+            if p.parent.is_dir():
+                results.append((f"  paths.{key}", PASS, str(p)))
             else:
-                results.append((f"  paths.bin_dir", WARN, f"{p} — not found"))
+                results.append((f"  paths.{key}", WARN, f"{p.parent} — parent dir not found"))
+        else:
+            # bin_dir, nuclei_templates, wordlists_dir are directories
+            if p.is_dir():
+                results.append((f"  paths.{key}", PASS, str(p)))
+            else:
+                results.append((f"  paths.{key}", WARN, f"{p} — not found"))
     return results
 
 

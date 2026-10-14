@@ -81,7 +81,7 @@ if [ -d "$BUNDLE_TMP/wheels" ]; then
     if ! command -v arjun &>/dev/null && [ -d "$DATA_DIR/pysrc/arjun" ]; then
         echo "[*] Wrapping arjun source..."
         ARJUN_SRC="$DATA_DIR/pysrc/arjun"
-        cat > "$DEST/arjun" << ARJUN_WRAP
+        $SUDO_CMD tee "$DEST/arjun" > /dev/null << ARJUN_WRAP
 #!/usr/bin/env bash
 export PYTHONPATH="$ARJUN_SRC:\${PYTHONPATH:-}"
 exec python3 -m arjun "\$@"
@@ -93,7 +93,7 @@ fi
 # --- Wrap sqlmap source ---
 if [ -d "$DATA_DIR/pysrc/sqlmap" ] && ! command -v sqlmap &>/dev/null; then
     echo "[*] Wrapping sqlmap source..."
-    cat > "$DEST/sqlmap" << SQLMAP_WRAP
+    $SUDO_CMD tee "$DEST/sqlmap" > /dev/null << SQLMAP_WRAP
 #!/usr/bin/env bash
 exec python3 "$DATA_DIR/pysrc/sqlmap/sqlmap.py" "\$@"
 SQLMAP_WRAP

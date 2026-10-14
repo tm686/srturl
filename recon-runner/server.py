@@ -953,7 +953,12 @@ class PipelineRunner:
                     continue
 
             # Run consolidation if specified
-            context = {"target": target, "host": target, "url": target}
+            # Extract hostname from URL for tools that need bare domain (gau, waybackurls)
+            if "://" in target:
+                host = urlparse(target).hostname or target
+            else:
+                host = target.split("/")[0].split(":")[0]
+            context = {"target": target, "host": host, "url": target}
             consolidate_fn = step.get("consolidate")
             context_key = step.get("context_key", "in_file")
 
@@ -1417,8 +1422,12 @@ class ReconHandler(SimpleHTTPRequestHandler):
         self.send_json(data)
 
     def handle_config_reload(self):
+        global runner
         self.cfg.reload()
         ReconHandler.tool_status = detect_tools(self.cfg)
+        # Update runner's reference so it doesn't use stale tool_status
+        if runner:
+            runner.tool_status = ReconHandler.tool_status
         self.send_json({"ok": True, "message": "config reloaded"})
 
     def handle_tools(self):
@@ -1448,18 +1457,20 @@ class ReconHandler(SimpleHTTPRequestHandler):
         })
 
     def handle_list_scans(self):
-        cursor = self.db.execute(
-            "SELECT id, target, target_type, round, profile, started_at, status "
-            "FROM scans ORDER BY id DESC LIMIT 50"
-        )
-        rows = [dict(r) for r in cursor.fetchall()]
+        with _db_lock:
+            cursor = self.db.execute(
+                "SELECT id, target, target_type, round, profile, started_at, status "
+                "FROM scans ORDER BY id DESC LIMIT 50"
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
         self.send_json({"scans": rows})
 
     def handle_stats(self):
         counts = {}
-        for table in ("scans", "subdomains", "hosts", "urls", "params", "findings"):
-            row = self.db.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()
-            counts[table] = row["c"]
+        with _db_lock:
+            for table in ("scans", "subdomains", "hosts", "urls", "params", "findings"):
+                row = self.db.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()
+                counts[table] = row["c"]
         self.send_json({"counts": counts})
 
     def handle_run_tool(self):
@@ -1499,9 +1510,14 @@ class ReconHandler(SimpleHTTPRequestHandler):
             scan_id = cursor.lastrowid
 
         # Build context for template substitution
+        # Extract hostname from URL for tools that need bare domain
+        if "://" in target:
+            host = urlparse(target).hostname or target
+        else:
+            host = target.split("/")[0].split(":")[0]
         context = body.get("context", {})
         context.setdefault("target", target)
-        context.setdefault("host", target)
+        context.setdefault("host", host)
         context.setdefault("url", target)
 
         # Run in background thread
@@ -1700,6 +1716,10 @@ class ReconHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "url required"}, 400)
             return
         with _db_lock:
+            row = self.db.execute("SELECT url FROM urls WHERE url=?", (url,)).fetchone()
+            if not row:
+                self.send_json({"error": "url not found in database"}, 404)
+                return
             self.db.execute(
                 "UPDATE urls SET promoted_to_target=0 WHERE url=?", (url,)
             )

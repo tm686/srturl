@@ -3,6 +3,10 @@
 Local recon & testing orchestrator for authorized security engagements.
 Pure Python 3 stdlib. Inspired by [ars0n-framework-v2](https://github.com/R-s0n/ars0n-framework-v2).
 
+![recon-runner main view](docs/ui-main.png)
+
+*Dashboard with target bar, pipeline selector, tool buttons (RECON/ENUM/ATTACK phases), live output log, and stats counter.*
+
 ## Quick Start
 
 ```bash
@@ -76,6 +80,14 @@ The ROI (Return on Investment) score ranks discovered URLs by how likely they ar
 - **LOW** (1-39) — Lower priority
 
 **ROI Report Modal:** Click "Open Report" to get a fullscreen paginated view of all targets, one per page, sorted high-to-low. Each page shows the URL, metadata, score breakdown, and a large screenshot. Navigate with arrow keys or Previous/Next buttons.
+
+![ROI report table](docs/ui-roi.png)
+
+*ROI table ranking discovered URLs by score — color-coded badges (HIGH/MED/LOW), score breakdown, triage dropdowns, and promote buttons.*
+
+![ROI report modal](docs/ui-roi-report.png)
+
+*ROI report modal — paginated detail view with score breakdown, tech stack, screenshot, and promote/demote controls.*
 
 ### Promote / Auto-Promote
 
